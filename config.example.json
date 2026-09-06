@@ -57,6 +57,8 @@
     "min_record_seconds": 0.4,
     "tail_silence_seconds": 1.0,
     "output_tail_silence": 0.8,
+    "barge_in": true,
+    "barge_in_threshold": 0.02,
     "input_device": null,
     "output_device": null
   },

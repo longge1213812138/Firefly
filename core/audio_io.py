@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import queue
+import threading
 import time
 import wave
 
@@ -144,6 +145,95 @@ def play_wav_bytes(wav_bytes: bytes, device: int | None = None, tail_silence: fl
 
     sd.play(a, samplerate=sr, device=device)
     sd.wait()
+
+
+def play_wav_bytes_interruptible(
+    wav_bytes: bytes,
+    input_device: int | None = None,
+    output_device: int | None = None,
+    tail_silence: float = 0.8,
+    mic_threshold: float = 0.02,
+    min_voice_seconds: float = 0.25,
+) -> bool:
+    """播放语音并同时监听麦克风，检测到用户说话立即停止（barge-in）。
+
+    返回 True 表示被用户打断，False 表示自然播完。
+    打不开麦克风（如蓝牙设备不支持同时收发）时退化为普通播放并返回 False。
+    """
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        sr = wf.getframerate()
+        nch = wf.getnchannels()
+        n = wf.getnframes()
+        raw = wf.readframes(n)
+
+    audio = np.frombuffer(raw, dtype=np.int16)
+    if nch > 1:
+        audio = audio.reshape(-1, nch).mean(axis=1)
+    a = audio.astype(np.float32) / 32768.0
+    if tail_silence > 0:
+        a = np.concatenate([a, np.zeros(int(sr * tail_silence), dtype=np.float32)])
+
+    # 播放放到后台线程，主线程轮询麦克风检测用户是否插话
+    done = threading.Event()
+
+    def _play():
+        try:
+            sd.play(a, samplerate=sr, device=output_device)
+            sd.wait()
+        finally:
+            done.set()
+
+    threading.Thread(target=_play, daemon=True).start()
+
+    block = 1024
+    q: queue.Queue = queue.Queue()
+
+    def _cb(indata, frames, time_info, status):  # noqa: ARG001
+        q.put(indata.copy())
+
+    instream = None
+    try:
+        instream = sd.InputStream(samplerate=sr, channels=1, dtype="int16",
+                                  blocksize=block, device=input_device, callback=_cb)
+        instream.start()
+    except Exception:  # noqa: BLE001
+        instream = None  # 打不开麦克风（如蓝牙不支持同时收发）→ 只播不监听
+
+    required_blocks = max(1, int(min_voice_seconds * sr / block))
+    voice_blocks = 0
+    interrupted = False
+    try:
+        while not done.is_set():
+            if instream is None:
+                done.wait(0.1)
+                continue
+            try:
+                data = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if _rms(data.reshape(-1)) > mic_threshold:
+                voice_blocks += 1
+            else:
+                voice_blocks = 0
+            if voice_blocks >= required_blocks:
+                interrupted = True
+                try:
+                    sd.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                break
+    finally:
+        if instream is not None:
+            try:
+                instream.stop()
+                instream.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # 等播放线程收尾
+    if interrupted:
+        done.wait(1.0)
+    return interrupted
 
 
 def play_beep(freq: int = 880, duration: float = 0.14, sample_rate: int = 16000, device: int | None = None) -> None:

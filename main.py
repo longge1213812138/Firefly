@@ -105,16 +105,28 @@ class Fairy:
             print("  ⚠️ 没听清（识别结果为空），请再说一次", flush=True)
         return text
 
-    def say(self, text: str) -> None:
+    def say(self, text: str) -> bool:
+        """播报回复。返回 True 表示被用户插话打断，False 表示自然播完。"""
         print(f"\n🧚 Fairy：{text}\n", flush=True)
         if not self.speak:
-            return
+            return False
         try:
             wav_bytes = self.tts.synth(text)
-            tail = float(self.cfg["audio"].get("output_tail_silence", 0.8))
-            audio_io.play_wav_bytes(wav_bytes, device=self.cfg["audio"].get("output_device"), tail_silence=tail)
+            a = self.cfg["audio"]
+            tail = float(a.get("output_tail_silence", 0.8))
+            if a.get("barge_in", True):
+                return audio_io.play_wav_bytes_interruptible(
+                    wav_bytes,
+                    input_device=a.get("input_device"),
+                    output_device=a.get("output_device"),
+                    tail_silence=tail,
+                    mic_threshold=float(a.get("barge_in_threshold", 0.02)),
+                )
+            audio_io.play_wav_bytes(wav_bytes, device=a.get("output_device"), tail_silence=tail)
+            return False
         except Exception as exc:  # noqa: BLE001
             print(f"  （语音播报失败：{exc}）", flush=True)
+            return False
 
     # ---------- 主循环 ----------
     def run_voice(self) -> None:
@@ -164,12 +176,28 @@ class Fairy:
                 if _is_exit(user_text):
                     self.say("好，我先去休息啦，随时叫我。")
                     break
-                try:
-                    reply = self.respond(user_text)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"  （对话失败：{exc}）", flush=True)
-                    continue
-                self.say(reply)
+                # 对话 + 播报，支持被打断后立刻接着说（最多连续 3 轮）
+                for _ in range(3):
+                    try:
+                        reply = self.respond(user_text)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  （对话失败：{exc}）", flush=True)
+                        break
+                    if not self.say(reply):
+                        break
+                    # 被用户插话打断 → 立即接着听他说
+                    print("  🎤 你打断了 Fairy，请继续说……", flush=True)
+                    try:
+                        user_text = self.listen()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  （录音/识别失败：{exc}）", flush=True)
+                        break
+                    if not user_text or is_wake_phrase(user_text):
+                        break
+                    if _is_exit(user_text):
+                        self.say("好，我先去休息啦，随时叫我。")
+                        return
+                    print(f"\n🗣 你：{user_text}", flush=True)
         except KeyboardInterrupt:
             print("\n已退出。", flush=True)
         finally:
