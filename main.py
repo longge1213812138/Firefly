@@ -1,11 +1,13 @@
-"""Fairy（流萤）本地语音助手 · MVP 入口
+"""Fairy（流萤）本地语音助手 · 主入口
 
-用法（在「启动助手.bat」里已封装，也可命令行）：
-  python main.py              语音模式（默认）
+用法（一键脚本已封装，也可命令行）：
+  python main.py              语音模式（默认；桌宠随语音模式自动出现）
   python main.py --text       键盘输入模式（不用麦克风，方便调试/没配 Key 时试跑）
   python main.py --devices    查看电脑的麦克风/喇叭设备
   python main.py --search 关键词   检索历史对话
   python main.py --selftest   离线自检（不联网）
+  python main.py --pet        只启动桌宠
+  python gui.py               图形控制台（对话/记忆/配置/状态）
 """
 from __future__ import annotations
 
@@ -29,16 +31,31 @@ from core.wake import WakeListener  # noqa: E402
 
 
 class Fairy:
-    def __init__(self, cfg: dict, speak: bool = True, verbose: bool = True):
+    def __init__(self, cfg: dict, speak: bool = True, verbose: bool = True,
+                 confirm_fn=None, echo: bool = True):
         self.cfg = cfg
         self.speak = speak
         self.verbose = verbose
+        self.echo = echo              # 是否把对话打印到控制台（GUI 模式关掉）
+        self.confirm_fn = confirm_fn  # 危险操作确认回调（默认命令行 input；GUI 传弹窗）
+        self.on_state = None          # 状态回调：idle/listening/thinking/speaking（桌宠用）
         self.persona = load_persona(cfg)
         self.memory = Memory(cfg["memory"]["db_path"])
         self.llm = llm_mod.make_llm(cfg, system_prompt=self.persona)
         self.asr = make_asr(cfg)
         self.tts = make_tts(cfg)
         self.session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+
+    def _set_state(self, s: str) -> None:
+        if self.on_state:
+            try:
+                self.on_state(s)
+            except Exception:
+                pass
+
+    def _say_line(self, text: str) -> None:
+        if self.echo:
+            print(text, flush=True)
 
     # ---------- 核心对话 ----------
     def _system_prompt(self, recall: str) -> str:
@@ -49,37 +66,65 @@ class Fairy:
         return "\n".join(parts)
 
     def respond(self, user_text: str, auto_confirm: bool = False) -> str:
-        self.memory.add(self.session_id, "user", user_text)
-        recall = self.memory.build_recall_block(
-            user_text, top_k=int(self.cfg["memory"].get("recall_top_k", 5))
-        )
-        self.llm.system_prompt = self._system_prompt(recall)
+        self._set_state("thinking")
+        try:
+            self.memory.add(self.session_id, "user", user_text)
+            # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
+            self.persona = load_persona(self.cfg)
+            recall = self.memory.build_recall_block(
+                user_text, top_k=int(self.cfg["memory"].get("recall_top_k", 5))
+            )
+            self.llm.system_prompt = self._system_prompt(recall)
 
-        history = self.memory.recent(
-            self.session_id, limit=int(self.cfg["llm"].get("max_history_turns", 20))
-        )
-        messages = [{"role": h["role"], "content": h["content"]} for h in history]
+            history = self.memory.recent(
+                self.session_id, limit=int(self.cfg["llm"].get("max_history_turns", 20))
+            )
+            messages = [{"role": h["role"], "content": h["content"]} for h in history]
 
-        reply = self.llm.chat(messages)
-        text, action = llm_mod.extract_action(reply)
+            reply = self.llm.chat(messages)
+            text, acts = llm_mod.extract_actions(reply)
 
-        if action:
-            ok, out = actions.execute(self.cfg, action, auto_confirm=auto_confirm,
-                                      session_id=self.session_id)
-            note = f"（操作 {action.get('name')} {'成功' if ok else '失败'}：{str(out)[:400]}）"
-            messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": f"系统提示：{note} 请用自然语言简短告诉用户结果。"})
-            try:
-                text = self.llm.chat(messages).strip()
-            except Exception:
-                text = (text + " " + note).strip()
+            if acts:
+                # 撤销清单（F-06 AC3）：把全部待执行操作列出，一次性确认
+                require_any = any(safety.needs_confirm(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
+                hard_any = any(safety.is_hard(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
+                allowed = True
+                if require_any:
+                    prompt = safety.format_confirm_list(acts)
+                    if hard_any:
+                        allowed = bool(self.confirm_fn and self.confirm_fn(prompt))
+                    else:
+                        allowed = True if auto_confirm else bool(self.confirm_fn and self.confirm_fn(prompt))
+                if not allowed:
+                    for a in acts:
+                        safety.audit(self.cfg, {"session_id": self.session_id,
+                                                "action": a.get("name", ""), "args": a.get("args") or {},
+                                                "result": "用户拒绝", "risk": "high"})
+                    note = f"（用户在确认清单上取消了全部 {len(acts)} 个操作）"
+                else:
+                    results = []
+                    for a in acts:  # 已在清单上确认过 → 逐个执行
+                        ok, out = actions.execute(self.cfg, a, auto_confirm=True,
+                                                  session_id=self.session_id,
+                                                  confirm_fn=self.confirm_fn)
+                        results.append(f"{a.get('name')} {'成功' if ok else '失败'}：{str(out)[:150]}")
+                    note = f"（操作结果：{'；'.join(results)[:400]}）"
+                messages.append({"role": "assistant", "content": text})
+                messages.append({"role": "user", "content": f"系统提示：{note} 请用自然语言简短告诉用户结果。"})
+                try:
+                    text = self.llm.chat(messages).strip()
+                except Exception:
+                    text = (text + " " + note).strip()
 
-        self.memory.add(self.session_id, "assistant", text)
-        return text
+            self.memory.add(self.session_id, "assistant", text)
+            return text
+        finally:
+            self._set_state("idle")
 
     # ---------- 语音链路 ----------
     def listen(self) -> str:
         a = self.cfg["audio"]
+        self._set_state("listening")
         if self.verbose:
             print("  🎤 聆听中……（说完停一下即可）", flush=True)
         data = audio_io.record_until_silence(
@@ -107,29 +152,45 @@ class Fairy:
 
     def say(self, text: str) -> bool:
         """播报回复。返回 True 表示被用户插话打断，False 表示自然播完。"""
-        print(f"\n🧚 Fairy：{text}\n", flush=True)
-        if not self.speak:
-            return False
+        if self.echo:
+            print(f"\n🧚 Fairy：{text}\n", flush=True)
+        self._set_state("speaking")
         try:
-            wav_bytes = self.tts.synth(text)
-            a = self.cfg["audio"]
-            tail = float(a.get("output_tail_silence", 0.8))
-            if a.get("barge_in", True):
-                return audio_io.play_wav_bytes_interruptible(
-                    wav_bytes,
-                    input_device=a.get("input_device"),
-                    output_device=a.get("output_device"),
-                    tail_silence=tail,
-                    mic_threshold=float(a.get("barge_in_threshold", 0.02)),
-                )
-            audio_io.play_wav_bytes(wav_bytes, device=a.get("output_device"), tail_silence=tail)
-            return False
-        except Exception as exc:  # noqa: BLE001
-            print(f"  （语音播报失败：{exc}）", flush=True)
-            return False
+            if not self.speak:
+                return False
+            try:
+                wav_bytes = self.tts.synth(text)
+                a = self.cfg["audio"]
+                tail = float(a.get("output_tail_silence", 0.8))
+                if a.get("barge_in", True):
+                    return audio_io.play_wav_bytes_interruptible(
+                        wav_bytes,
+                        input_device=a.get("input_device"),
+                        output_device=a.get("output_device"),
+                        tail_silence=tail,
+                        mic_threshold=float(a.get("barge_in_threshold", 0.02)),
+                    )
+                audio_io.play_wav_bytes(wav_bytes, device=a.get("output_device"), tail_silence=tail)
+                return False
+            except Exception as exc:  # noqa: BLE001
+                print(f"  （语音播报失败：{exc}）", flush=True)
+                return False
+        finally:
+            self._set_state("idle")
 
     # ---------- 主循环 ----------
     def run_voice(self) -> None:
+        # 桌宠（config.json 的 pet.enabled 可关闭；失败不影响语音对话）
+        if self.cfg.get("pet", {}).get("enabled", True):
+            try:
+                from core.pet import start_pet_thread
+
+                pet_q = start_pet_thread(self.cfg)
+                self.on_state = lambda s: pet_q.put(s)
+                print("🧚 桌宠已上线：可拖拽、拖到屏幕边缘贴边隐藏；右键有菜单，双击可预览四种状态", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"（桌宠未能启动，不影响语音对话：{exc}）", flush=True)
+
         waker = WakeListener(self.cfg["wake"], sample_rate=int(self.cfg["audio"]["sample_rate"]),
                              device=self.cfg["audio"].get("input_device"))
         mode = waker.start()
@@ -313,9 +374,16 @@ def main() -> int:
     ap.add_argument("--no-speak", action="store_true", help="不播报语音（只显示文字）")
     ap.add_argument("--mic-test", action="store_true", help="麦克风音量体检（录 3 秒并给出阈值建议）")
     ap.add_argument("--diag", action="store_true", help="云端服务体检（分别测 ASR/TTS/LLM）")
+    ap.add_argument("--pet", action="store_true", help="只启动桌宠（不进入语音对话）")
     args = ap.parse_args()
 
     cfg = load_config()
+
+    if args.pet:
+        from core.pet import run_pet
+
+        run_pet(cfg)
+        return 0
 
     if args.diag:
         diag(cfg)

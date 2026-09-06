@@ -73,3 +73,20 @@ def extract_action(reply: str) -> tuple[str, dict | None]:
     except json.JSONDecodeError:
         pass
     return reply.strip(), None
+
+
+def extract_actions(reply: str) -> tuple[str, list[dict]]:
+    """从回复中拆出全部 ACTION 指令（支持批量），返回 (纯文本回复, 动作列表)。"""
+    actions: list[dict] = []
+
+    def _collect(m: re.Match) -> str:
+        try:
+            a = json.loads(m.group(1))
+            if isinstance(a, dict) and "name" in a:
+                actions.append(a)
+        except json.JSONDecodeError:
+            pass
+        return ""
+
+    text = ACTION_RE.sub(_collect, reply).strip()
+    return text, actions

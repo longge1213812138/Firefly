@@ -78,5 +78,13 @@
     "audit_log": "data/audit.log"
   },
 
+  "pet": {
+    "_说明": "桌宠小萤火虫。enabled=true 时启动语音助手会同时显示桌宠；demo=true 时循环演示四种状态；start_x/start_y 填数字可固定初始位置，留空则出现在屏幕右下角。",
+    "enabled": true,
+    "demo": false,
+    "start_x": null,
+    "start_y": null
+  },
+
   "persona_path": "persona/default.md"
 }

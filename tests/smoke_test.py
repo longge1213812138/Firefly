@@ -172,6 +172,64 @@ def run_selftest(cfg: dict) -> int:
         w.close()
         return mode in ("porcupine", "keyboard"), f"当前唤醒方式={mode}"
 
+    # 11. 硬闸口：删除/覆盖/外发必须当面确认，自动流程绕不过
+    def t_safety_hard():
+        from core import actions, safety
+
+        h1 = safety.is_hard(cfg, "delete_file", {"path": "x.txt"})
+        h2 = safety.is_hard(cfg, "write_file", {"path": "config.json", "content": "覆盖"})
+        h3 = safety.is_hard(cfg, "run_command", {"cmd": "del x.txt"})
+        h4 = safety.is_hard(cfg, "write_file", {"path": "新文件-自检.txt", "content": "新建"})
+        # 硬闸口：即使 auto_confirm=True，确认回调拒绝（或没有）就执行不了
+        ok, out = actions.execute(
+            cfg, {"name": "delete_file", "args": {"path": "自检-不存在.txt"}},
+            auto_confirm=True, confirm_fn=lambda p: False,
+        )
+        # 保护目录：删除根目录必须被拒绝
+        ok2, out2 = actions._run("delete_file", {"path": "C:/"})
+        return (h1 and h2 and h3 and (not h4) and (not ok) and (not ok2),
+                f"删={h1} 覆盖={h2} 危险命令={h3} 新建={h4} 拦截={str(out)[:12]} 根目录保护={not ok2}")
+
+    # 12. 批量 ACTION 解析（撤销清单的数据来源）
+    def t_extract_actions():
+        from core.llm import extract_actions
+
+        reply = ("好的，分两步来。\n"
+                 "ACTION:{\"name\":\"get_time\",\"args\":{}}\n"
+                 "ACTION:{\"name\":\"list_dir\",\"args\":{\"path\":\".\"}}")
+        text, acts = extract_actions(reply)
+        single_text, single = extract_actions("只是随便聊聊")
+        ok = (len(acts) == 2 and acts[0]["name"] == "get_time"
+              and "两步" in text and "ACTION" not in text and single == [])
+        return ok, f"批量解析={len(acts)} 个｜纯文本无动作列表={single == []}"
+
+    # 13. 桌宠状态机（不弹窗口）
+    def t_pet_brain():
+        from core.pet import STATES, PetBrain
+
+        b = PetBrain()
+        b.set_state("listening")
+        keep = b.state == "listening"
+        b.set_state("不存在状态")
+        keep = keep and b.state == "listening"
+        b.tick()
+        g = b.glow
+        sp = PetBrain("speaking")
+        sp.frame = 2  # frame//3=0 → 口型张开帧
+        idl = PetBrain("idle")
+        idl.frame = 3
+        return (keep and 0.0 <= g <= 1.0 and sp.mouth_open and not idl.mouth_open
+                and len(STATES) == 4), f"非法状态保持={keep} 呼吸={g:.2f} 口型={sp.mouth_open}"
+
+    # 14. GUI 模块可导入（不弹窗口）
+    def t_gui_module():
+        import gui
+
+        need = ("ConsoleApp", "set_autostart", "autostart_path", "main", "ChatWorker")
+        missing = [n for n in need if not hasattr(gui, n)]
+        tk_ok = gui.tk is not None
+        return not missing and tk_ok, f"缺失={missing}｜tkinter 可用={tk_ok}"
+
     for name, fn in [
         ("配置与人设加载", t_config),
         ("记忆写入与中文检索", t_memory),
@@ -183,6 +241,10 @@ def run_selftest(cfg: dict) -> int:
         ("音频编解码", t_audio),
         ("全链路对话（离线桩）", t_pipeline),
         ("唤醒模块", t_wake),
+        ("硬闸口（删除/覆盖/外发强制确认）", t_safety_hard),
+        ("批量 ACTION 解析（撤销清单）", t_extract_actions),
+        ("桌宠状态机", t_pet_brain),
+        ("GUI 模块（tkinter）", t_gui_module),
     ]:
         check(name, fn)
 
