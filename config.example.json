@@ -1,0 +1,80 @@
+{
+  "_说明": "这是配置模板（不含真实 Key）。复制本文件为 config.json 后填入你的 Key 即可。真正的 config.json 已被 .gitignore 排除，不会提交到仓库。",
+
+  "mimo": {
+    "_说明": "小米 MiMo 开放平台，三关（ASR 语音识别 / TTS 语音合成 / LLM 大脑）共用一个 Key。已切 Token Plan：base_url 为 token-plan-cn 专属地址，Key 是 tp- 开头。",
+    "api_key": "",
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "asr_model": "mimo-v2.5-asr",
+    "tts_model": "mimo-v2.5-tts",
+    "voice": "mimo_default",
+    "language": "auto",
+    "audio_format": "wav"
+  },
+
+  "asr": {
+    "_说明": "语音识别服务商。provider=mimo 走小米；换别家改 whisper_api 并填该家 api_key/base_url/model。留空则复用 mimo。",
+    "provider": "mimo",
+    "api_key": "",
+    "base_url": "",
+    "model": "mimo-v2.5-asr",
+    "language": "auto"
+  },
+
+  "tts": {
+    "_说明": "语音合成服务商。默认复用 mimo；若 TTS 在 Token Plan 上不可用，可把 base_url 单独改回 https://api.xiaomimimo.com/v1。",
+    "api_key": "",
+    "base_url": "",
+    "model": "mimo-v2.5-tts",
+    "voice": "mimo_default",
+    "audio_format": "wav"
+  },
+
+  "llm": {
+    "_说明": "大脑模型：小米 MiMo（mimo-v2.5）。api_key 留空会自动复用上面 mimo 的 tp- Key。",
+    "api_key": "",
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "model": "mimo-v2.5",
+    "auth": "api-key",
+    "temperature": 0.9,
+    "max_history_turns": 20
+  },
+
+  "wake": {
+    "_说明": "唤醒方式。engine=auto：有 Picovoice Key + 唤醒词模型文件就用语音唤醒「Hi Fairy」，否则降级为空格键说话。",
+    "keyword": "Hi Fairy",
+    "engine": "auto",
+    "porcupine_access_key": "",
+    "porcupine_keyword_path": "",
+    "sensitivity": 0.85
+  },
+
+  "audio": {
+    "_说明": "麦克风/喇叭参数。silence_threshold 越小越灵敏；tail_silence_seconds 是说完停顿多久判定结束；output_tail_silence 是播报末尾补的静音（防蓝牙截尾）。",
+    "sample_rate": 16000,
+    "silence_threshold": 0.008,
+    "max_record_seconds": 20,
+    "min_record_seconds": 0.4,
+    "tail_silence_seconds": 1.0,
+    "output_tail_silence": 0.8,
+    "input_device": null,
+    "output_device": null
+  },
+
+  "memory": {
+    "_说明": "记忆系统。全部对话存本地 SQLite，支持关键词检索。",
+    "db_path": "data/memory.db",
+    "recall_top_k": 5
+  },
+
+  "safety": {
+    "_说明": "安全闸口：命中这些关键词的操作会强制二次确认，无法关闭；所有操作写入审计日志。",
+    "require_confirm_keywords": [
+      "删除", "删掉", "移除", "清空", "格式化", "覆盖", "重写", "改名",
+      "del ", "rm ", "format", "remove", "发送", "上传", "邮件", "发布", "付款", "转账"
+    ],
+    "audit_log": "data/audit.log"
+  },
+
+  "persona_path": "persona/default.md"
+}
