@@ -25,3 +25,4 @@
 | 短哈希 | 提交时间 | 提交说明 | 完整哈希 |
 | --- | --- | --- | --- |
 | ee54c7c | 2026-09-07 02:40:49 | init: Fairy 语音助手 MVP 首个版本 | ee54c7c957702ccf83db7644cee115bfc4ba21cd |
+| 1f35caa | 2026-09-07 02:41:26 | chore: 添加 .gitattributes 保护批处理文件不被换行转换 | 1f35caa82713ff0123eabccf0e347435b2ace8d1 |
