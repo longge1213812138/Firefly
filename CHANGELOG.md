@@ -46,3 +46,4 @@
 | ee54c7c | 2026-09-07 02:40:49 | init: Fairy 语音助手 MVP 首个版本 | ee54c7c957702ccf83db7644cee115bfc4ba21cd |
 | 1f35caa | 2026-09-07 02:41:26 | chore: 添加 .gitattributes 保护批处理文件不被换行转换 | 1f35caa82713ff0123eabccf0e347435b2ace8d1 |
 | d993a1c | 2026-09-07 02:48:59 | feat: 新增语音打断(barge-in)，说话时可直接插话 | d993a1c7270dff04266b6e01a51c98ceddeee208 |
+| 99fe74e | 2026-09-07 03:21:57 | feat: v0.2.0 桌宠+GUI控制台+安全硬闸口与撤销清单+声线配置化 | 99fe74e078ffccdfc39dbbd79ff81d08a315e662 |
