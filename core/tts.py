@@ -1,8 +1,15 @@
-"""语音合成：小米 MiMo-V2.5-TTS（chat/completions + audio 参数，返回 base64 音频）。"""
+"""语音合成：小米 MiMo-V2.5-TTS（chat/completions + audio 参数，返回 base64 音频）。
+
+支持三种模型：
+- mimo-v2.5-tts：预置音色
+- mimo-v2.5-tts-voicedesign：文本描述定制音色
+- mimo-v2.5-tts-voiceclone：音频样本复刻音色
+"""
 from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import requests
 
@@ -19,16 +26,39 @@ class MiMoTTS:
     def _headers(self) -> dict:
         return {"api-key": self.api_key, "Content-Type": "application/json"}
 
-    def synth(self, text: str) -> bytes:
-        """返回音频字节（默认 wav）。"""
+    def synth(self, text: str, voice_instruction: str = None, reference_audio_path: str = None) -> bytes:
+        """返回音频字节（默认 wav）。
+
+        Args:
+            text: 要合成的文本
+            voice_instruction: voicedesign模型的音色描述（可选）
+            reference_audio_path: voiceclone模型的参考音频路径（可选）
+        """
         if not self.api_key:
             raise RuntimeError("未配置 MiMo API Key：请先在 config.json 的 mimo.api_key 填入。")
+
+        messages = []
+        # 如果是voicedesign模型，需要user message作为音色描述
+        if voice_instruction and self.model == "mimo-v2.5-tts-voicedesign":
+            messages.append({"role": "user", "content": voice_instruction})
+        # 助手消息包含要合成的文本
+        messages.append({"role": "assistant", "content": text})
+
         payload = {
             "model": self.model,
-            # 注意：要合成的文本必须放在 assistant 消息里
-            "messages": [{"role": "assistant", "content": text}],
+            "messages": messages,
             "audio": {"format": self.fmt, "voice": self.voice},
         }
+
+        # 如果是voiceclone模型，需要提供参考音频
+        if reference_audio_path and self.model == "mimo-v2.5-tts-voiceclone":
+            try:
+                audio_bytes = Path(reference_audio_path).read_bytes()
+                audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+                payload["reference_audio"] = audio_base64
+            except Exception as e:
+                raise RuntimeError(f"无法读取参考音频文件 {reference_audio_path}: {e}")
+
         r = requests.post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
@@ -57,3 +87,28 @@ def make_tts(cfg: dict) -> "MiMoTTS":
     if t.get("model"):
         merged["tts_model"] = t["model"]
     return MiMoTTS(merged)
+
+
+def list_available_voices() -> list[dict]:
+    """返回可用音色列表（预置音色 + 自定义音色）。"""
+    return [
+        {"id": "mimo_default", "name": "MiMo默认（冰糖）", "type": "preset", "language": "zh"},
+        {"id": "冰糖", "name": "冰糖", "type": "preset", "language": "zh"},
+        {"id": "茉莉", "name": "茉莉", "type": "preset", "language": "zh"},
+        {"id": "苏打", "name": "苏打", "type": "preset", "language": "zh"},
+        {"id": "白桦", "name": "白桦", "type": "preset", "language": "zh"},
+        {"id": "Mia", "name": "Mia", "type": "preset", "language": "en"},
+        {"id": "Chloe", "name": "Chloe", "type": "preset", "language": "en"},
+        {"id": "Milo", "name": "Milo", "type": "preset", "language": "en"},
+        {"id": "Dean", "name": "Dean", "type": "preset", "language": "en"},
+        {"id": "custom", "name": "自定义音色（需配置）", "type": "custom", "language": "auto"},
+    ]
+
+
+def get_voice_info(voice_id: str) -> dict | None:
+    """获取指定音色的详细信息。"""
+    voices = list_available_voices()
+    for v in voices:
+        if v["id"] == voice_id:
+            return v
+    return None

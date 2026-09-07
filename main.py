@@ -26,6 +26,7 @@ from core import actions, audio_io, llm as llm_mod, safety  # noqa: E402
 from core.asr import make_asr  # noqa: E402
 from core.config import load_config, load_persona  # noqa: E402
 from core.memory import Memory  # noqa: E402
+from core.stats import UsageStats  # noqa: E402
 from core.tts import MiMoTTS, make_tts  # noqa: E402
 from core.wake import WakeListener  # noqa: E402
 
@@ -41,6 +42,8 @@ class Fairy:
         self.on_state = None          # 状态回调：idle/listening/thinking/speaking（桌宠用）
         self.persona = load_persona(cfg)
         self.memory = Memory(cfg["memory"]["db_path"])
+        self.stats = UsageStats(cfg.get("stats", {}).get("path", "data/stats.json"))
+        self.stats.record_session()
         self.llm = llm_mod.make_llm(cfg, system_prompt=self.persona)
         self.asr = make_asr(cfg)
         self.tts = make_tts(cfg)
@@ -69,6 +72,7 @@ class Fairy:
         self._set_state("thinking")
         try:
             self.memory.add(self.session_id, "user", user_text)
+            self.stats.record_message("user")
             # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
             self.persona = load_persona(self.cfg)
             recall = self.memory.build_recall_block(
@@ -117,6 +121,10 @@ class Fairy:
                     text = (text + " " + note).strip()
 
             self.memory.add(self.session_id, "assistant", text)
+            self.stats.record_message("assistant")
+            if acts:
+                for a in acts:
+                    self.stats.record_action(a.get("name", "unknown"))
             return text
         finally:
             self._set_state("idle")
@@ -159,7 +167,10 @@ class Fairy:
             if not self.speak:
                 return False
             try:
-                wav_bytes = self.tts.synth(text)
+                # 获取自定义音色参数
+                voice_instruction = self.cfg.get("tts", {}).get("voice_instruction", "")
+                reference_audio_path = self.cfg.get("tts", {}).get("reference_audio_path", "")
+                wav_bytes = self.tts.synth(text, voice_instruction, reference_audio_path)
                 a = self.cfg["audio"]
                 tail = float(a.get("output_tail_silence", 0.8))
                 if a.get("barge_in", True):
@@ -375,6 +386,7 @@ def main() -> int:
     ap.add_argument("--mic-test", action="store_true", help="麦克风音量体检（录 3 秒并给出阈值建议）")
     ap.add_argument("--diag", action="store_true", help="云端服务体检（分别测 ASR/TTS/LLM）")
     ap.add_argument("--pet", action="store_true", help="只启动桌宠（不进入语音对话）")
+    ap.add_argument("--stats", action="store_true", help="查看使用统计")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -383,6 +395,28 @@ def main() -> int:
         from core.pet import run_pet
 
         run_pet(cfg)
+        return 0
+
+    if args.stats:
+        stats = UsageStats(cfg.get("stats", {}).get("path", "data/stats.json"))
+        s = stats.summary()
+        print("\n=== 使用统计 ===")
+        for k, v in s.items():
+            if k == "最常用操作":
+                print(f"  {k}：")
+                if v:
+                    for name, cnt in v:
+                        print(f"    {name}: {cnt} 次")
+                else:
+                    print("    （暂无）")
+            elif k == "分类分布":
+                print(f"  {k}：")
+                for cat, cnt in v.items():
+                    if cnt > 0:
+                        print(f"    {cat}: {cnt} 条")
+            else:
+                print(f"  {k}：{v}")
+        print()
         return 0
 
     if args.diag:

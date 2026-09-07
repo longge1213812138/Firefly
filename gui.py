@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover
 
 from core.config import ROOT, load_config, load_persona  # noqa: E402
 from core.memory import Memory  # noqa: E402
+from core.tts import list_available_voices, get_voice_info  # noqa: E402
 
 FONT = ("Microsoft YaHei UI", 10)
 FONT_BOLD = ("Microsoft YaHei UI", 10, "bold")
@@ -385,13 +386,40 @@ class ConsoleApp:
         ttk.Entry(wrap, textvariable=self.baseurl_var, width=46).grid(
             row=row["n"], column=1, sticky="w", pady=3)
 
+        label("TTS 模型", font=FONT)
+        self.tts_model_var = tk.StringVar(value=self.cfg.get("tts", {}).get("model", "mimo-v2.5-tts"))
+        ttk.Combobox(wrap, textvariable=self.tts_model_var, width=43,
+                     values=["mimo-v2.5-tts", "mimo-v2.5-tts-voicedesign", "mimo-v2.5-tts-voiceclone"],
+                     state="readonly").grid(row=row["n"], column=1, sticky="w", pady=3)
+        ttk.Label(wrap, text="预置音色/文本设计/音频复刻", font=FONT_SMALL,
+                  foreground="#8a8f98").grid(row=row["n"], column=2, sticky="w", padx=6)
+
         label("音色（voice）", font=FONT)
         self.voice_var = tk.StringVar(
             value=self.cfg.get("tts", {}).get("voice") or mimo.get("voice", "mimo_default"))
         ttk.Entry(wrap, textvariable=self.voice_var, width=46).grid(
             row=row["n"], column=1, sticky="w", pady=3)
-        ttk.Label(wrap, text="换音色/接 voicedesign 只改这里", font=FONT_SMALL,
+        ttk.Label(wrap, text="预置音色ID或自定义音色标识", font=FONT_SMALL,
                   foreground="#8a8f98").grid(row=row["n"], column=2, sticky="w", padx=6)
+
+        # voicedesign音色描述
+        self.voice_instruction_var = tk.StringVar(value=self.cfg.get("tts", {}).get("voice_instruction", ""))
+        self.voice_instruction_frame = ttk.Frame(wrap)
+        self.voice_instruction_frame.grid(row=next_row(), columnspan=3, sticky="we", pady=3)
+        ttk.Label(self.voice_instruction_frame, text="音色描述（voicedesign用）", font=FONT).pack(side="left")
+        ttk.Entry(self.voice_instruction_frame, textvariable=self.voice_instruction_var, width=40).pack(side="left", padx=5)
+        ttk.Label(self.voice_instruction_frame, text="例：温柔甜美的年轻女性，语速适中", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=5)
+
+        # voiceclone参考音频
+        self.ref_audio_var = tk.StringVar(value=self.cfg.get("tts", {}).get("reference_audio_path", ""))
+        self.ref_audio_frame = ttk.Frame(wrap)
+        self.ref_audio_frame.grid(row=next_row(), columnspan=3, sticky="we", pady=3)
+        ttk.Label(self.ref_audio_frame, text="参考音频（voiceclone用）", font=FONT).pack(side="left")
+        ttk.Entry(self.ref_audio_frame, textvariable=self.ref_audio_var, width=35).pack(side="left", padx=5)
+        ttk.Button(self.ref_audio_frame, text="浏览...", command=self._browse_ref_audio).pack(side="left", padx=5)
+        ttk.Label(self.ref_audio_frame, text="10-30秒清晰人声音频", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=5)
 
         label("性格随机度 temperature", font=FONT)
         self.temp_var = tk.StringVar(value=str(llm.get("temperature", 0.9)))
@@ -479,7 +507,10 @@ class ConsoleApp:
         raw["llm"]["base_url"] = self.baseurl_var.get().strip()
         raw["llm"]["temperature"] = temp
         raw.setdefault("tts", {})
+        raw["tts"]["model"] = self.tts_model_var.get().strip()
         raw["tts"]["voice"] = self.voice_var.get().strip()
+        raw["tts"]["voice_instruction"] = self.voice_instruction_var.get().strip()
+        raw["tts"]["reference_audio_path"] = self.ref_audio_var.get().strip()
         raw.setdefault("wake", {})
         raw["wake"]["keyword"] = self.keyword_var.get().strip()
         raw.setdefault("audio", {})
@@ -504,6 +535,21 @@ class ConsoleApp:
         except Exception as exc:  # noqa: BLE001
             self.autostart_var.set(not enable)
             messagebox.showerror("设置失败", str(exc))
+
+    def _browse_ref_audio(self) -> None:
+        """浏览选择参考音频文件（voiceclone用）。"""
+        from tkinter import filedialog
+        filetypes = [
+            ("音频文件", "*.wav *.mp3 *.flac *.ogg *.m4a"),
+            ("所有文件", "*.*"),
+        ]
+        path = filedialog.askopenfilename(
+            title="选择参考音频文件（10-30秒清晰人声）",
+            filetypes=filetypes,
+            initialdir=str(ROOT / "data"),
+        )
+        if path:
+            self.ref_audio_var.set(path)
 
     # ============ ④ 状态 ============
     def _build_status_tab(self) -> None:

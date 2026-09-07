@@ -27,6 +27,12 @@ DESCRIPTIONS = (
     "8. copy_file {\"src\":\"源\", \"dst\":\"目标\"} —— 复制文件（需确认）\n"
     "9. move_file {\"src\":\"源\", \"dst\":\"目标\"} —— 移动文件（需确认）\n"
     "10. delete_file {\"path\":\"文件\"} —— 删除单个文件（硬闸口：必须当面确认）\n"
+    "11. search_files {\"path\":\"搜索范围目录\", \"pattern\":\"文件名模式\", \"content\":\"内容关键词\"} —— 搜索文件（按名称和/或内容）\n"
+    "12. batch_rename {\"path\":\"目录\", \"pattern\":\"原模式\", \"replacement\":\"替换模式\", \"regex\":false} —— 批量重命名文件（需确认）\n"
+    "13. organize_files {\"src\":\"源目录\", \"dst\":\"目标目录\", \"strategy\":\"type|date\"} —— 按类型或日期整理文件（需确认）\n"
+    "14. compress_files {\"src\":\"源目录或文件\", \"dst\":\"压缩包路径\"} —— 压缩文件/目录为zip（需确认）\n"
+    "15. extract_archive {\"src\":\"压缩包路径\", \"dst\":\"解压目标目录\"} —— 解压zip文件（需确认）\n"
+    "16. get_system_info 无参数 —— 获取系统信息（CPU/内存/磁盘）\n"
     "规则：删除、覆盖、外发、付款类操作必须先当面征求用户同意，绝不自作主张；"
     "批量整理类任务把多个 ACTION 各占一行一起提交，等用户在清单上一次性确认。"
 )
@@ -113,6 +119,126 @@ def _run(name: str, args: dict) -> tuple[bool, str]:
                 return False, f"目录不存在：{p}"
             shutil.rmtree(p)
             return True, f"已删除目录 {p}"
+        if name == "search_files":
+            base = Path(args.get("path", ".")).expanduser()
+            pattern = args.get("pattern", "*")
+            content = args.get("content", "")
+            if not base.is_dir():
+                return False, f"搜索目录不存在：{base}"
+            matches = []
+            for p in base.rglob(pattern):
+                if len(matches) >= 50:
+                    break
+                if content and p.is_file():
+                    try:
+                        text = p.read_text(encoding="utf-8", errors="ignore")[:50000]
+                        if content.lower() not in text.lower():
+                            continue
+                    except Exception:
+                        continue
+                matches.append(str(p.relative_to(base)))
+            if not matches:
+                return True, f"未找到匹配的文件（模式：{pattern}，内容：{content or '无'}）"
+            return True, f"找到 {len(matches)} 个文件：\n" + "\n".join(matches)
+        if name == "batch_rename":
+            base = Path(args.get("path", "")).expanduser()
+            pat = args.get("pattern", "")
+            repl = args.get("replacement", "")
+            use_regex = args.get("regex", False)
+            if not base.is_dir():
+                return False, f"目录不存在：{base}"
+            if not pat:
+                return False, "请提供原模式（pattern）"
+            renamed = []
+            for p in sorted(base.iterdir()):
+                if use_regex:
+                    import re
+                    new_name = re.sub(pat, repl, p.name)
+                else:
+                    new_name = p.name.replace(pat, repl)
+                if new_name != p.name:
+                    new_path = p.parent / new_name
+                    p.rename(new_path)
+                    renamed.append(f"{p.name} → {new_name}")
+            if not renamed:
+                return True, "没有文件匹配该模式"
+            return True, f"已重命名 {len(renamed)} 个文件：\n" + "\n".join(renamed[:20])
+        if name == "organize_files":
+            src = Path(args.get("src", "")).expanduser()
+            dst = Path(args.get("dst", "")).expanduser()
+            strategy = args.get("strategy", "type")
+            if not src.is_dir():
+                return False, f"源目录不存在：{src}"
+            dst.mkdir(parents=True, exist_ok=True)
+            moved = []
+            for p in sorted(src.iterdir()):
+                if not p.is_file():
+                    continue
+                if strategy == "type":
+                    ext = p.suffix.lower().lstrip(".")
+                    target_dir = dst / (ext or "无扩展名")
+                elif strategy == "date":
+                    ts = p.stat().st_mtime
+                    target_dir = dst / datetime.fromtimestamp(ts).strftime("%Y-%m")
+                else:
+                    target_dir = dst
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = target_dir / p.name
+                shutil.move(str(p), str(target))
+                moved.append(f"{p.name} → {target_dir.name}/")
+            if not moved:
+                return True, "没有文件需要整理"
+            return True, f"已整理 {len(moved)} 个文件到 {dst}"
+        if name == "compress_files":
+            src = Path(args.get("src", "")).expanduser()
+            dst = Path(args.get("dst", "")).expanduser()
+            if not src.exists():
+                return False, f"源不存在：{src}"
+            import zipfile
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_file():
+                with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(src, src.name)
+                return True, f"已压缩 {src.name} → {dst}"
+            # 目录
+            with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in sorted(src.rglob("*")):
+                    if p.is_file():
+                        zf.write(p, p.relative_to(src.parent))
+            return True, f"已压缩 {src.name}/ → {dst}"
+        if name == "extract_archive":
+            src = Path(args.get("src", "")).expanduser()
+            dst = Path(args.get("dst", "")).expanduser()
+            if not src.is_file():
+                return False, f"压缩包不存在：{src}"
+            import zipfile
+            dst.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(src, "r") as zf:
+                zf.extractall(dst)
+            return True, f"已解压 {src.name} → {dst}"
+        if name == "get_system_info":
+            import platform
+            try:
+                import psutil
+                has_psutil = True
+            except ImportError:
+                has_psutil = False
+            info = {
+                "系统": platform.system(),
+                "版本": platform.version(),
+                "架构": platform.machine(),
+                "处理器": platform.processor(),
+            }
+            if has_psutil:
+                info["CPU核心"] = psutil.cpu_count()
+                info["内存总量"] = f"{psutil.virtual_memory().total / (1024**3):.1f} GB"
+                info["内存使用"] = f"{psutil.virtual_memory().percent}%"
+                disk = psutil.disk_usage("/")
+                info["磁盘总量"] = f"{disk.total / (1024**3):.1f} GB"
+                info["磁盘使用"] = f"{disk.percent}%"
+            else:
+                info["提示"] = "安装 psutil 可获取更多系统信息：pip install psutil"
+            return True, "\n".join(f"{k}：{v}" for k, v in info.items())
         return False, f"未知操作：{name}"
     except Exception as exc:  # noqa: BLE001
         return False, f"执行失败：{exc}"

@@ -62,6 +62,7 @@ def needs_confirm(cfg: dict, action_name: str, args: dict) -> bool:
     dangerous_actions = {
         "write_file", "run_command", "delete", "send",
         "delete_file", "delete_dir", "move_file", "copy_file", "send_file", "send_message",
+        "batch_rename", "organize_files", "compress_files", "extract_archive",
     }
     if name in dangerous_actions:
         return True
