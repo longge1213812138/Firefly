@@ -1,15 +1,17 @@
 """流萤 · 控制台（GUI 操作台，对应需求 F-03）。
 
-四个标签页：
+五个标签页：
   ① 对话  —— 文字聊天（与语音模式同一套大脑/记忆/安全闸口），可点「🎙 说话」
              用麦克风说一句；危险操作会弹窗确认（撤销清单）。
   ② 记忆  —— 浏览与检索全部历史对话（本地 SQLite）。
-  ③ 配置  —— API Key（掩码显示）、模型、音色、唤醒词、录音阈值、桌宠开关、
+  ③ 配置  —— API Key（掩码显示）、模型、TTS 音色/模型、唤醒词、录音阈值、桌宠开关、
              开机自启、人设编辑器。保存后自动重载大脑（人设即时生效）。
-  ④ 状态  —— 一键体检（ASR/TTS/LLM）、离线自检、审计日志查看、数据位置说明。
+  ④ 统计  —— 使用统计（对话次数、操作频率、分类分布、记忆库信息）。
+  ⑤ 状态  —— 一键体检（ASR/TTS/LLM）、离线自检、审计日志查看、数据位置说明。
 
 仅依赖 Python 自带 tkinter；聊天与大模型调用都在后台线程，界面不卡。
 弹窗策略（本期约定）：危险操作=askyesno 弹窗；保存成功=提示框；退出=确认框。
+系统托盘（需安装 pystray + pillow）：关闭窗口最小化到托盘，右键托盘图标恢复/退出。
 """
 from __future__ import annotations
 
@@ -34,8 +36,16 @@ try:
 except Exception:  # pragma: no cover
     tk = None
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    HAS_TRAY = True
+except ImportError:
+    HAS_TRAY = False
+
 from core.config import ROOT, load_config, load_persona  # noqa: E402
 from core.memory import Memory  # noqa: E402
+from core.stats import UsageStats  # noqa: E402
 from core.tts import list_available_voices, get_voice_info  # noqa: E402
 
 FONT = ("Microsoft YaHei UI", 10)
@@ -197,6 +207,7 @@ class ConsoleApp:
         self._build_chat_tab()
         self._build_memory_tab()
         self._build_config_tab()
+        self._build_stats_tab()
         self._build_status_tab()
 
         self.root.after(150, self._poll_ui)
@@ -405,7 +416,7 @@ class ConsoleApp:
         # voicedesign音色描述
         self.voice_instruction_var = tk.StringVar(value=self.cfg.get("tts", {}).get("voice_instruction", ""))
         self.voice_instruction_frame = ttk.Frame(wrap)
-        self.voice_instruction_frame.grid(row=next_row(), columnspan=3, sticky="we", pady=3)
+        self.voice_instruction_frame.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=3)
         ttk.Label(self.voice_instruction_frame, text="音色描述（voicedesign用）", font=FONT).pack(side="left")
         ttk.Entry(self.voice_instruction_frame, textvariable=self.voice_instruction_var, width=40).pack(side="left", padx=5)
         ttk.Label(self.voice_instruction_frame, text="例：温柔甜美的年轻女性，语速适中", font=FONT_SMALL,
@@ -414,7 +425,7 @@ class ConsoleApp:
         # voiceclone参考音频
         self.ref_audio_var = tk.StringVar(value=self.cfg.get("tts", {}).get("reference_audio_path", ""))
         self.ref_audio_frame = ttk.Frame(wrap)
-        self.ref_audio_frame.grid(row=next_row(), columnspan=3, sticky="we", pady=3)
+        self.ref_audio_frame.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=3)
         ttk.Label(self.ref_audio_frame, text="参考音频（voiceclone用）", font=FONT).pack(side="left")
         ttk.Entry(self.ref_audio_frame, textvariable=self.ref_audio_var, width=35).pack(side="left", padx=5)
         ttk.Button(self.ref_audio_frame, text="浏览...", command=self._browse_ref_audio).pack(side="left", padx=5)
@@ -551,7 +562,90 @@ class ConsoleApp:
         if path:
             self.ref_audio_var.set(path)
 
-    # ============ ④ 状态 ============
+    # ============ ④ 统计 ============
+    def _build_stats_tab(self) -> None:
+        f = ttk.Frame(self.nb)
+        self.nb.add(f, text=" 统计 ")
+
+        self.stats_box = ScrolledText(f, height=20, font=("Consolas", 10), state="disabled",
+                                      wrap="word", relief="flat", background="#f6f6f2")
+        self.stats_box.pack(fill="both", expand=True, padx=8, pady=8)
+
+        btn_row = ttk.Frame(f)
+        btn_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btn_row, text="🔄 刷新统计", command=self._refresh_stats).pack(side="left")
+        ttk.Button(btn_row, text="🧹 清理过期记忆", command=self._cleanup_expired).pack(side="left", padx=8)
+
+        self._refresh_stats()
+
+    def _refresh_stats(self) -> None:
+        """刷新使用统计显示。"""
+        try:
+            stats = UsageStats(str(ROOT / "data" / "stats.json"))
+            s = stats.summary()
+            lines = [
+                "═══════ 使用统计 ═══════",
+                "",
+                f"  总消息数：{s['总消息数']}",
+                f"  总对话轮次：{s['总对话轮次']}",
+                f"  总会话数：{s['总会话数']}",
+                f"  首次使用：{s['首次使用']}",
+                "",
+                f"  今日消息：{s['今日消息']}",
+                f"  今日操作：{s['今日操作']}",
+                "",
+                "─── 分类分布 ───",
+            ]
+            for cat, cnt in s["分类分布"].items():
+                if cnt > 0:
+                    lines.append(f"  {cat}：{cnt} 条")
+
+            lines.append("")
+            lines.append("─── 最常用操作 ───")
+            if s["最常用操作"]:
+                for name, cnt in s["最常用操作"]:
+                    lines.append(f"  {name}：{cnt} 次")
+            else:
+                lines.append("  （暂无）")
+
+            # 记忆库信息
+            lines.append("")
+            lines.append("─── 记忆库 ───")
+            try:
+                mem = Memory(str(ROOT / "data" / "memory.db"))
+                ms = mem.stats()
+                lines.append(f"  总记忆条数：{ms['total']}")
+                if ms["earliest"]:
+                    lines.append(f"  最早记忆：{ms['earliest']}")
+                if ms["latest"]:
+                    lines.append(f"  最新记忆：{ms['latest']}")
+                lines.append(f"  平均重要度：{ms['avg_importance']}")
+                mem.close()
+            except Exception as exc:
+                lines.append(f"  读取失败：{exc}")
+
+            self.stats_box.configure(state="normal")
+            self.stats_box.delete("1.0", "end")
+            self.stats_box.insert("1.0", "\n".join(lines))
+            self.stats_box.configure(state="disabled")
+        except Exception as exc:
+            self.stats_box.configure(state="normal")
+            self.stats_box.delete("1.0", "end")
+            self.stats_box.insert("1.0", f"读取统计失败：{exc}")
+            self.stats_box.configure(state="disabled")
+
+    def _cleanup_expired(self) -> None:
+        """清理过期记忆。"""
+        try:
+            mem = Memory(str(ROOT / "data" / "memory.db"))
+            count = mem.cleanup_expired()
+            mem.close()
+            messagebox.showinfo("清理完成", f"已清理 {count} 条过期记忆。")
+            self._refresh_stats()
+        except Exception as exc:
+            messagebox.showerror("清理失败", str(exc))
+
+    # ============ ⑤ 状态 ============
     def _build_status_tab(self) -> None:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 状态 ")
@@ -656,10 +750,72 @@ class ConsoleApp:
         self.root.after(150, self._poll_ui)
 
     def _on_close(self) -> None:
+        """点击关闭按钮 → 最小化到系统托盘（而非退出）。"""
+        if self.busy:
+            if not messagebox.askyesno(
+                    "最小化", "Fairy 正在回复中，最小化到托盘后对话会在后台继续。确定？"):
+                return
+        self.root.withdraw()  # 隐藏窗口
+        if not hasattr(self, "_tray_icon") or self._tray_icon is None:
+            self._start_tray()
+
+    def _quit_app(self) -> None:
+        """真正退出应用。"""
         if self.busy and not messagebox.askyesno(
                 "退出", "Fairy 正在回复中，退出将中断本轮对话。确定退出？"):
             return
+        self._stop_tray()
         self.root.destroy()
+
+    # ============ 系统托盘 ============
+    def _create_tray_image(self) -> "Image.Image":
+        """生成一个小萤火虫图标（64x64）。"""
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # 萤火虫身体（椭圆）
+        draw.ellipse([20, 18, 44, 46], fill=(255, 215, 0, 255))
+        # 发光
+        draw.ellipse([24, 22, 40, 42], fill=(255, 255, 150, 200))
+        # 眼睛
+        draw.ellipse([28, 26, 32, 30], fill=(60, 40, 20, 255))
+        draw.ellipse([33, 26, 37, 30], fill=(60, 40, 20, 255))
+        # 翅膀
+        draw.ellipse([10, 12, 28, 30], fill=(200, 230, 255, 120))
+        draw.ellipse([36, 12, 54, 30], fill=(200, 230, 255, 120))
+        return img
+
+    def _start_tray(self) -> None:
+        if not HAS_TRAY:
+            return
+        try:
+            image = self._create_tray_image()
+            menu = pystray.Menu(
+                pystray.MenuItem("显示控制台", self._tray_restore, default=True),
+                pystray.MenuItem("退出", self._tray_quit),
+            )
+            self._tray_icon = pystray.Icon("fairy", image, "流萤 Fairy", menu)
+            threading.Thread(target=self._tray_icon.run, daemon=True).start()
+        except Exception:
+            pass
+
+    def _stop_tray(self) -> None:
+        if hasattr(self, "_tray_icon") and self._tray_icon:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+
+    def _tray_restore(self, icon=None, item=None):
+        self.root.after(0, self._restore_from_tray)
+
+    def _restore_from_tray(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_quit(self, icon=None, item=None):
+        self.root.after(0, self._quit_app)
 
 
 def main() -> int:
