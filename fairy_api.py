@@ -30,7 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 
 def _emit(obj: dict, code: int = 0) -> int:
@@ -60,7 +60,10 @@ def cmd_ping(cfg: dict, args) -> int:
         sys.stderr.write(f"memory unavailable: {exc}\n")
 
     llm = cfg.get("llm", {}) or {}
-    llm_ok = bool(llm.get("api_key")) or "xiaomimimo" in str(llm.get("base_url", ""))
+    mimo_key = bool((cfg.get("mimo", {}) or {}).get("api_key"))
+    # 小米系会自动复用 mimo 的 Key，所以"地址是小米"还得配上 Key 才算真的可用
+    llm_ok = bool(llm.get("api_key")) or (
+        "xiaomimimo" in str(llm.get("base_url", "")) and mimo_key)
     tts_model = (cfg.get("tts", {}) or {}).get("model") or (cfg.get("mimo", {}) or {}).get("tts_model", "")
     agents = {name: b.available() for name, b in agent_backend.list_backends(cfg).items()}
     return _emit({

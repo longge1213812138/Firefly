@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
@@ -33,7 +34,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 try:
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
     from tkinter.scrolledtext import ScrolledText
 except Exception:  # pragma: no cover
     tk = None
@@ -45,7 +46,10 @@ try:
 except ImportError:
     HAS_TRAY = False
 
-from core.config import ROOT, load_config, load_persona  # noqa: E402
+from core.config import is_frozen, load_config, load_persona, resolve_root  # noqa: E402
+
+# 打包成 exe 后，配置 / 数据 / 日志都要落在 exe 同级目录，而不是临时解包目录 _MEIPASS
+APP_ROOT = resolve_root()
 from core.memory import Memory  # noqa: E402
 from core.stats import UsageStats  # noqa: E402
 from core.tts import list_available_voices, get_voice_info  # noqa: E402
@@ -68,14 +72,17 @@ def autostart_enabled() -> bool:
 
 
 def set_autostart(enable: bool) -> str:
-    """开机自启：往「启动」文件夹放/删一个 bat（GBK+CRLF，双击系统可识别）。"""
+    """开机自启：往「启动」文件夹放/删一个 bat（GBK+CRLF，双击系统可识别）。
+
+    打包成 exe 后没有「启动助手.bat」，改为直接拉起「流萤助手.exe」。
+    """
     p = autostart_path()
     if enable:
-        content = (
-            "@echo off\r\n"
-            f"cd /d \"{ROOT}\"\r\n"
-            "start \"\" \"启动助手.bat\"\r\n"
-        )
+        if is_frozen():
+            launch = f'start "" "{APP_ROOT / "流萤助手.exe"}"\r\n'
+        else:
+            launch = 'start "" "启动助手.bat"\r\n'
+        content = "@echo off\r\n" + f'cd /d "{APP_ROOT}"\r\n' + launch
         with open(p, "w", encoding="gbk", newline="") as f:
             f.write(content)
     elif p.exists():
@@ -88,6 +95,15 @@ def _tail(path: Path, n: int = 200) -> list[str]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         return lines[-n:]
     except OSError:
+        return []
+
+
+def _safe_json_list(raw) -> list[str]:
+    """把数据库里存的 JSON 标签串安全地转成字符串列表。"""
+    try:
+        val = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        return [str(x) for x in val] if isinstance(val, list) else []
+    except Exception:  # noqa: BLE001
         return []
 
 
@@ -299,64 +315,285 @@ class ConsoleApp:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 记忆 ")
 
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=8, pady=8)
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(bar, text="关键词", font=FONT).pack(side="left")
         self.search_var = tk.StringVar()
-        e = ttk.Entry(top, textvariable=self.search_var, font=FONT, width=32)
-        e.pack(side="left")
-        e.bind("<Return>", lambda ev: self._do_search())
-        ttk.Button(top, text="🔍 搜索", command=self._do_search).pack(side="left", padx=6)
-        ttk.Button(top, text="最近对话", command=self._show_recent).pack(side="left")
+        ent = ttk.Entry(bar, textvariable=self.search_var, font=FONT, width=22)
+        ent.pack(side="left", padx=(4, 6))
+        ent.bind("<Return>", lambda ev: self._mem_reload(reset_page=True))
+        ttk.Button(bar, text="🔍 搜索",
+                   command=lambda: self._mem_reload(reset_page=True)).pack(side="left")
+        ttk.Button(bar, text="最近", command=self._mem_recent).pack(side="left", padx=4)
+        ttk.Button(bar, text="重置筛选", command=self._mem_reset_filter).pack(side="left")
+
+        ttk.Label(bar, text="  分类", font=FONT).pack(side="left")
+        self.mem_cat_var = tk.StringVar(value="全部")
+        self.mem_cat_box = ttk.Combobox(bar, textvariable=self.mem_cat_var, width=10,
+                                        state="readonly", values=["全部"])
+        self.mem_cat_box.pack(side="left", padx=4)
+        self.mem_cat_box.bind("<<ComboboxSelected>>",
+                              lambda ev: self._mem_reload(reset_page=True))
+
+        ttk.Label(bar, text="  重要度≥", font=FONT).pack(side="left")
+        self.mem_imp_var = tk.StringVar(value="0")
+        imp_box = ttk.Combobox(bar, textvariable=self.mem_imp_var, width=4,
+                               state="readonly", values=["0", "3", "5", "8"])
+        imp_box.pack(side="left", padx=4)
+        imp_box.bind("<<ComboboxSelected>>", lambda ev: self._mem_reload(reset_page=True))
+
+        act = ttk.Frame(f)
+        act.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(act, text="⭐ 提高重要度", command=lambda: self._mem_bump(1)).pack(side="left")
+        ttk.Button(act, text="🔽 降低重要度", command=lambda: self._mem_bump(-1)).pack(side="left", padx=4)
+        ttk.Button(act, text="🏷 加标签", command=self._mem_add_tag).pack(side="left")
+        ttk.Button(act, text="🗑 删除选中", command=self._mem_delete).pack(side="left", padx=4)
+        ttk.Button(act, text="⬇ 导出 JSON", command=lambda: self._mem_export("json")).pack(side="left")
+        ttk.Button(act, text="⬇ 导出 CSV", command=lambda: self._mem_export("csv")).pack(side="left", padx=4)
+        ttk.Button(act, text="🧹 清理过期", command=self._mem_cleanup).pack(side="left")
         self.mem_count_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.mem_count_var, font=FONT_SMALL,
+        ttk.Label(act, textvariable=self.mem_count_var, font=FONT_SMALL,
                   foreground="#6b7280").pack(side="right")
 
-        self.mem_box = ScrolledText(f, font=FONT, state="disabled", wrap="word",
-                                    relief="flat", background="#fbfbf7")
-        self.mem_box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.mem_box.tag_configure("role_u", foreground="#2b5fb8", font=FONT_BOLD)
-        self.mem_box.tag_configure("role_a", foreground="#1f7a3d", font=FONT_BOLD)
-        self.mem_box.tag_configure("ts", foreground="#8a8f98", font=FONT_SMALL)
-        self._show_recent()
+        body = ttk.Panedwindow(f, orient="vertical")
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
+        top = ttk.Frame(body)
+        cols = ("ts", "role", "category", "importance", "content")
+        self.mem_tree = ttk.Treeview(top, columns=cols, show="headings", height=12,
+                                     selectmode="browse")
+        for key, text, width, anchor, stretch in (
+            ("ts", "时间", 118, "w", False),
+            ("role", "角色", 56, "center", False),
+            ("category", "分类", 62, "center", False),
+            ("importance", "重要度", 58, "center", False),
+            ("content", "内容（双击下方看全文）", 520, "w", True),
+        ):
+            self.mem_tree.heading(key, text=text)
+            self.mem_tree.column(key, width=width, anchor=anchor, stretch=stretch)
+        vs = ttk.Scrollbar(top, orient="vertical", command=self.mem_tree.yview)
+        self.mem_tree.configure(yscrollcommand=vs.set)
+        self.mem_tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+        self.mem_tree.tag_configure("user", foreground="#2b5fb8")
+        self.mem_tree.tag_configure("assistant", foreground="#1f7a3d")
+        self.mem_tree.tag_configure("important", background="#fdf6e3")
+        self.mem_tree.bind("<<TreeviewSelect>>", lambda ev: self._mem_show_detail())
+        body.add(top, weight=3)
+
+        det = ttk.Frame(body)
+        ttk.Label(det, text="选中条目的完整内容", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(anchor="w")
+        self.mem_detail = ScrolledText(det, height=7, font=FONT, wrap="word")
+        self.mem_detail.pack(fill="both", expand=True)
+        body.add(det, weight=2)
+
+        page = ttk.Frame(f)
+        page.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(page, text="← 上一页", command=lambda: self._mem_page(-1)).pack(side="left")
+        self.mem_page_var = tk.StringVar(value="")
+        ttk.Label(page, textvariable=self.mem_page_var, font=FONT_SMALL).pack(side="left", padx=8)
+        ttk.Button(page, text="下一页 →", command=lambda: self._mem_page(1)).pack(side="left")
+        ttk.Label(page, text="每页", font=FONT_SMALL).pack(side="left", padx=(16, 2))
+        self.mem_size_var = tk.StringVar(value="50")
+        size_box = ttk.Combobox(page, textvariable=self.mem_size_var, width=5,
+                                state="readonly", values=["20", "50", "100", "200"])
+        size_box.pack(side="left")
+        size_box.bind("<<ComboboxSelected>>", lambda ev: self._mem_reload(reset_page=True))
+        self.mem_db_var = tk.StringVar(value="")
+        ttk.Label(page, textvariable=self.mem_db_var, font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="right")
+
+        self._mem_page_no = 0
+        self._mem_refresh_categories()
+        self._mem_reload(reset_page=True)
 
     def _hist(self) -> Memory:
         if self._hist_mem is None:
             self._hist_mem = Memory(self.cfg["memory"]["db_path"])
         return self._hist_mem
 
-    def _mem_render(self, rows: list[dict], title: str) -> None:
-        self.mem_box.configure(state="normal")
-        self.mem_box.delete("1.0", "end")
-        self.mem_box.insert("end", f"{title}\n\n", "ts")
-        if not rows:
-            self.mem_box.insert("end", "（没有找到记录）\n")
-        for h in rows:
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
-            who = "你" if h["role"] == "user" else "Fairy"
-            tag = "role_u" if h["role"] == "user" else "role_a"
-            self.mem_box.insert("end", f"[{ts}] ", "ts")
-            self.mem_box.insert("end", f"{who}：", tag)
-            self.mem_box.insert("end", f"{h['content']}\n\n")
-        self.mem_box.configure(state="disabled")
-        self.mem_box.yview("1.0")
-
-    def _do_search(self) -> None:
-        q = self.search_var.get().strip()
-        if not q:
-            return
+    def _mem_refresh_categories(self) -> None:
         try:
-            rows = self._hist().search(q, limit=20)
-            self._mem_render(rows, f"搜索「{q}」命中 {len(rows)} 条：")
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("检索失败", str(exc))
+            cats = ["全部"] + [c for c in self._hist().categories() if c != "全部"]
+        except Exception:  # noqa: BLE001
+            cats = ["全部"]
+        self.mem_cat_box.configure(values=cats)
 
-    def _show_recent(self) -> None:
+    def _mem_imp(self) -> int:
         try:
-            rows = self._recent_rows(50)
-            self._mem_render(rows, f"最近 {len(rows)} 条对话（按时间正序展示）：")
-            self.mem_count_var.set(f"记忆库共 {self._hist().count()} 条｜{self.cfg['memory']['db_path']}")
+            return int(self.mem_imp_var.get() or 0)
+        except ValueError:
+            return 0
+
+    def _mem_size(self) -> int:
+        try:
+            return int(self.mem_size_var.get() or 50)
+        except ValueError:
+            return 50
+
+    def _mem_reload(self, reset_page: bool = False) -> None:
+        if reset_page:
+            self._mem_page_no = 0
+        try:
+            mem = self._hist()
+            kw = self.search_var.get().strip()
+            cat = self.mem_cat_var.get().strip()
+            total = mem.count_query(kw, cat, self._mem_imp())
+            size = self._mem_size()
+            pages = max(1, (total + size - 1) // size)
+            self._mem_page_no = max(0, min(self._mem_page_no, pages - 1))
+            rows = mem.query(kw, cat, self._mem_imp(),
+                             offset=self._mem_page_no * size, limit=size)
+
+            self.mem_tree.delete(*self.mem_tree.get_children())
+            for r in rows:
+                ts = time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))
+                who = "你" if r["role"] == "user" else "Fairy"
+                tags = _safe_json_list(r.get("tags"))
+                body = str(r["content"]).replace("\n", " ")
+                if tags:
+                    body = f"[{'/'.join(tags)}] " + body
+                marks = [r["role"]]
+                if int(r.get("importance") or 0) >= 8:
+                    marks.append("important")
+                self.mem_tree.insert(
+                    "", "end", iid=str(r["id"]),
+                    values=(ts, who, r.get("category") or "对话",
+                            r.get("importance", 5), body),
+                    tags=tuple(marks),
+                )
+            self.mem_detail.delete("1.0", "end")
+            self.mem_page_var.set(f"第 {self._mem_page_no + 1} / {pages} 页")
+            self.mem_count_var.set(f"命中 {total} 条｜库内共 {mem.count()} 条")
+            self.mem_db_var.set(str(self.cfg["memory"]["db_path"]))
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("读取失败", str(exc))
+
+    def _mem_recent(self) -> None:
+        self.search_var.set("")
+        self.mem_cat_var.set("全部")
+        self.mem_imp_var.set("0")
+        self._mem_reload(reset_page=True)
+
+    def _mem_reset_filter(self) -> None:
+        self._mem_recent()
+
+    def _mem_page(self, delta: int) -> None:
+        self._mem_page_no = max(0, self._mem_page_no + delta)
+        self._mem_reload()
+
+    def _mem_selected_id(self) -> int | None:
+        sel = self.mem_tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _mem_show_detail(self) -> None:
+        mid = self._mem_selected_id()
+        if mid is None:
+            return
+        try:
+            cur = self._hist().conn.cursor()
+            cur.execute("SELECT role, content, ts, category, importance, tags "
+                        "FROM messages WHERE id=?", (mid,))
+            row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("读取失败", str(exc))
+            return
+        self.mem_detail.delete("1.0", "end")
+        if not row:
+            return
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["ts"]))
+        who = "你" if row["role"] == "user" else "Fairy"
+        tags = _safe_json_list(row["tags"])
+        head = (f"#{mid}　{ts}　{who}　分类：{row['category'] or '对话'}　"
+                f"重要度：{row['importance']}　标签：{', '.join(tags) or '无'}\n"
+                + "-" * 56 + "\n")
+        self.mem_detail.insert("end", head)
+        self.mem_detail.insert("end", str(row["content"]))
+
+    def _mem_bump(self, delta: int) -> None:
+        mid = self._mem_selected_id()
+        if mid is None:
+            messagebox.showinfo("提示", "请先在列表里选中一条记忆。")
+            return
+        try:
+            mem = self._hist()
+            cur = mem.conn.cursor()
+            cur.execute("SELECT importance FROM messages WHERE id=?", (mid,))
+            row = cur.fetchone()
+            if not row:
+                return
+            mem.update_importance(mid, max(0, min(10, int(row["importance"] or 0) + delta)))
+            self._mem_reload()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("修改失败", str(exc))
+
+    def _mem_add_tag(self) -> None:
+        mid = self._mem_selected_id()
+        if mid is None:
+            messagebox.showinfo("提示", "请先在列表里选中一条记忆。")
+            return
+        tag = simpledialog.askstring("加标签", "输入一个标签（例如 重要 / 待办 / 家人）：",
+                                     parent=self.root)
+        if not tag or not tag.strip():
+            return
+        try:
+            self._hist().add_tag(mid, tag.strip())
+            self._mem_reload()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("加标签失败", str(exc))
+
+    def _mem_delete(self) -> None:
+        mid = self._mem_selected_id()
+        if mid is None:
+            messagebox.showinfo("提示", "请先在列表里选中一条记忆。")
+            return
+        if not messagebox.askyesno("删除记忆",
+                                   f"确定删除第 #{mid} 条记忆？此操作不可撤销。",
+                                   icon="warning"):
+            return
+        try:
+            self._hist().delete(mid)
+            self._mem_reload()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("删除失败", str(exc))
+
+    def _mem_export(self, fmt: str) -> None:
+        kw = self.search_var.get().strip()
+        cat = self.mem_cat_var.get().strip()
+        path = filedialog.asksaveasfilename(
+            title="导出记忆", defaultextension=f".{fmt}",
+            initialfile=f"fairy_memory.{fmt}",
+            filetypes=[("JSON", "*.json")] if fmt == "json" else [("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            rows = self._hist().query(kw, cat, self._mem_imp(), offset=0, limit=100000)
+            if fmt == "json":
+                Path(path).write_text(
+                    json.dumps(rows, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8-sig")
+            else:
+                import csv
+                with open(path, "w", encoding="utf-8-sig", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["id", "时间", "角色", "分类", "重要度", "标签", "内容"])
+                    for r in rows:
+                        writer.writerow([
+                            r["id"],
+                            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])),
+                            r["role"], r.get("category") or "",
+                            r.get("importance") or 0,
+                            "/".join(_safe_json_list(r.get("tags"))),
+                            r["content"],
+                        ])
+            messagebox.showinfo("导出完成", f"已导出 {len(rows)} 条到：\n{path}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("导出失败", str(exc))
+
+    def _mem_cleanup(self) -> None:
+        self._cleanup_expired()
+        self._mem_reload()
 
     def _recent_rows(self, n: int) -> list[dict]:
         cur = self._hist().conn.cursor()
@@ -592,6 +829,86 @@ class ConsoleApp:
         ttk.Checkbutton(wrap, text="开机自动启动助手", variable=self.autostart_var,
                         command=self._toggle_autostart).grid(row=next_row(), column=1, sticky="w", pady=3)
 
+        # ---------- 情绪模型 ----------
+        ttk.Label(wrap, text="情绪模型（程序化）", font=FONT_BOLD).grid(
+            row=next_row(), column=0, columnspan=3, sticky="w", pady=(12, 2))
+        e_cfg = self.cfg.get("emotion", {}) or {}
+        erow = ttk.Frame(wrap)
+        erow.grid(row=next_row(), column=0, columnspan=3, sticky="we")
+        self.emo_enabled_var = tk.BooleanVar(value=bool(e_cfg.get("enabled", True)))
+        ttk.Checkbutton(erow, text="启用情绪模型", variable=self.emo_enabled_var).pack(side="left")
+        self.emo_llm_var = tk.BooleanVar(value=bool(e_cfg.get("infer_with_llm", True)))
+        ttk.Checkbutton(erow, text="用大模型推断情绪（关掉更省钱）",
+                        variable=self.emo_llm_var).pack(side="left", padx=10)
+        ttk.Label(erow, text="风格模式", font=FONT).pack(side="left", padx=(10, 2))
+        self.emo_mode_var = tk.StringVar(value=str(e_cfg.get("style_mode", "director")))
+        ttk.Combobox(erow, textvariable=self.emo_mode_var, width=10, state="readonly",
+                     values=["director", "brief"]).pack(side="left")
+        ttk.Label(erow, text="director=导演模式(角色/场景/指导)｜brief=一句话",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
+
+        erow2 = ttk.Frame(wrap)
+        erow2.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(2, 3))
+        e_base = e_cfg.get("baseline", {}) or {}
+        ttk.Label(erow2, text="基准  愉悦度", font=FONT).pack(side="left")
+        self.emo_base_v_var = tk.StringVar(value=str(e_base.get("valence", 0.25)))
+        ttk.Entry(erow2, textvariable=self.emo_base_v_var, width=6).pack(side="left", padx=(2, 10))
+        ttk.Label(erow2, text="唤醒度", font=FONT).pack(side="left")
+        self.emo_base_a_var = tk.StringVar(value=str(e_base.get("arousal", 0.45)))
+        ttk.Entry(erow2, textvariable=self.emo_base_a_var, width=6).pack(side="left", padx=(2, 10))
+        ttk.Label(erow2, text="亲密度", font=FONT).pack(side="left")
+        self.emo_base_i_var = tk.StringVar(value=str(e_base.get("intimacy", 0.3)))
+        ttk.Entry(erow2, textvariable=self.emo_base_i_var, width=6).pack(side="left", padx=(2, 14))
+        ttk.Label(erow2, text="每小时平复", font=FONT).pack(side="left")
+        self.emo_decay_var = tk.StringVar(value=str(e_cfg.get("decay_per_hour", 0.12)))
+        ttk.Entry(erow2, textvariable=self.emo_decay_var, width=6).pack(side="left", padx=(2, 4))
+        ttk.Label(erow2, text="0~1，越大越快平静", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        # ---------- Pi 协作 ----------
+        ttk.Label(wrap, text="Pi 协作（只在明确要求时调用外部 agent）", font=FONT_BOLD).grid(
+            row=next_row(), column=0, columnspan=3, sticky="w", pady=(12, 2))
+        p_cfg = self.cfg.get("pi", {}) or {}
+        prow = ttk.Frame(wrap)
+        prow.grid(row=next_row(), column=0, columnspan=3, sticky="we")
+        self.pi_enabled_var = tk.BooleanVar(value=bool(p_cfg.get("enabled", True)))
+        ttk.Checkbutton(prow, text="允许 /pi 调用", variable=self.pi_enabled_var).pack(side="left")
+        self.pi_ro_var = tk.BooleanVar(value=bool(p_cfg.get("read_only", False)))
+        ttk.Checkbutton(prow, text="只读模式（不给改文件 / 执行命令）",
+                        variable=self.pi_ro_var).pack(side="left", padx=10)
+        ttk.Label(prow, text="超时(秒)", font=FONT).pack(side="left", padx=(10, 2))
+        self.pi_timeout_var = tk.StringVar(value=str(p_cfg.get("timeout", 600)))
+        ttk.Entry(prow, textvariable=self.pi_timeout_var, width=7).pack(side="left")
+        ttk.Label(prow, text="输出", font=FONT).pack(side="left", padx=(10, 2))
+        self.pi_mode_var = tk.StringVar(value=str(p_cfg.get("mode", "text")))
+        ttk.Combobox(prow, textvariable=self.pi_mode_var, width=7, state="readonly",
+                     values=["text", "json"]).pack(side="left")
+
+        pirow1 = ttk.Frame(wrap)
+        pirow1.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(2, 3))
+        ttk.Label(pirow1, text="pi 路径", font=FONT).pack(side="left")
+        self.pi_cli_var = tk.StringVar(value=str(p_cfg.get("cli_path", "") or ""))
+        ttk.Entry(pirow1, textvariable=self.pi_cli_var, width=38).pack(side="left", padx=4)
+        ttk.Button(pirow1, text="浏览…", command=self._browse_pi_cli).pack(side="left")
+        ttk.Label(pirow1, text="留空 = 自动在 PATH 里找 pi", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=6)
+
+        pirow2 = ttk.Frame(wrap)
+        pirow2.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(0, 3))
+        ttk.Label(pirow2, text="工作目录", font=FONT).pack(side="left")
+        # load_config 会把空的 cwd 解析成项目根；这里若是项目根就显示为空，避免误导
+        cwd_show = str(p_cfg.get("cwd", "") or "")
+        try:
+            if cwd_show and Path(cwd_show).resolve() == Path(APP_ROOT).resolve():
+                cwd_show = ""
+        except OSError:
+            pass
+        self.pi_cwd_var = tk.StringVar(value=cwd_show)
+        ttk.Entry(pirow2, textvariable=self.pi_cwd_var, width=38).pack(side="left", padx=4)
+        ttk.Button(pirow2, text="浏览…", command=self._browse_pi_cwd).pack(side="left")
+        ttk.Label(pirow2, text="Pi 在哪个目录里干活", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=6)
+
         # 人设编辑器
         ttk.Label(wrap, text="人设 / 性格（persona）", font=FONT_BOLD).grid(
             row=next_row(), column=0, sticky="e", pady=(10, 2))
@@ -616,16 +933,21 @@ class ConsoleApp:
         messagebox.showinfo("已保存", "人设已保存，下一句对话立即生效。")
 
     def _save_config(self) -> None:
-        import json
-
         try:
             thresh = float(self.thresh_var.get())
             tail = float(self.tail_var.get())
             temp = float(self.temp_var.get())
+            emo_v = float(self.emo_base_v_var.get())
+            emo_a = float(self.emo_base_a_var.get())
+            emo_i = float(self.emo_base_i_var.get())
+            emo_decay = float(self.emo_decay_var.get())
+            pi_timeout = float(self.pi_timeout_var.get())
         except ValueError:
-            messagebox.showerror("格式不对", "阈值/温度请填数字（例如 0.008、1.0、0.9）")
+            messagebox.showerror("格式不对",
+                                 "阈值 / 温度 / 情绪基准 / 平复比例 / Pi 超时 都要填数字"
+                                 "（例如 0.008、0.9、0.25、0.12、600）")
             return
-        cfg_path = ROOT / "config.json"
+        cfg_path = APP_ROOT / "config.json"
         try:
             raw = json.loads(cfg_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
@@ -652,9 +974,28 @@ class ConsoleApp:
         raw["audio"]["barge_in"] = bool(self.barge_var.get())
         raw.setdefault("pet", {})
         raw["pet"]["enabled"] = bool(self.pet_var.get())
+        # 情绪模型
+        raw.setdefault("emotion", {})
+        raw["emotion"]["enabled"] = bool(self.emo_enabled_var.get())
+        raw["emotion"]["infer_with_llm"] = bool(self.emo_llm_var.get())
+        raw["emotion"]["style_mode"] = self.emo_mode_var.get().strip() or "director"
+        raw["emotion"]["decay_per_hour"] = emo_decay
+        raw["emotion"].setdefault("baseline", {})
+        raw["emotion"]["baseline"]["valence"] = emo_v
+        raw["emotion"]["baseline"]["arousal"] = emo_a
+        raw["emotion"]["baseline"]["intimacy"] = emo_i
+        # Pi 协作
+        raw.setdefault("pi", {})
+        raw["pi"]["enabled"] = bool(self.pi_enabled_var.get())
+        raw["pi"]["read_only"] = bool(self.pi_ro_var.get())
+        raw["pi"]["cli_path"] = self.pi_cli_var.get().strip()
+        raw["pi"]["cwd"] = self.pi_cwd_var.get().strip()
+        raw["pi"]["timeout"] = pi_timeout
+        raw["pi"]["mode"] = self.pi_mode_var.get().strip() or "text"
         cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         self.worker.submit("reload")
-        messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n（人设即时生效；换 Key/模型/音色后下一句对话用新配置）")
+        messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n"
+                                      "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置）")
 
     def _toggle_autostart(self) -> None:
         enable = bool(self.autostart_var.get())
@@ -679,10 +1020,22 @@ class ConsoleApp:
         path = filedialog.askopenfilename(
             title="选择参考音频文件（10-30秒清晰人声）",
             filetypes=filetypes,
-            initialdir=str(ROOT / "data"),
+            initialdir=str(APP_ROOT / "data"),
         )
         if path:
             self.ref_audio_var.set(path)
+
+    def _browse_pi_cli(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择 pi 可执行文件", initialdir=str(APP_ROOT),
+            filetypes=[("可执行文件", "*.cmd *.exe *.bat"), ("所有文件", "*.*")])
+        if path:
+            self.pi_cli_var.set(path)
+
+    def _browse_pi_cwd(self) -> None:
+        path = filedialog.askdirectory(title="选择 Pi 的工作目录", initialdir=str(APP_ROOT))
+        if path:
+            self.pi_cwd_var.set(path)
 
     # ============ ⑤ 统计 ============
     def _build_stats_tab(self) -> None:
@@ -703,7 +1056,8 @@ class ConsoleApp:
     def _refresh_stats(self) -> None:
         """刷新使用统计显示。"""
         try:
-            stats = UsageStats(str(ROOT / "data" / "stats.json"))
+            stats = UsageStats(str(self.cfg.get("stats", {}).get("path")
+                                   or (APP_ROOT / "data" / "stats.json")))
             s = stats.summary()
             lines = [
                 "═══════ 使用统计 ═══════",
@@ -734,7 +1088,7 @@ class ConsoleApp:
             lines.append("")
             lines.append("─── 记忆库 ───")
             try:
-                mem = Memory(str(ROOT / "data" / "memory.db"))
+                mem = Memory(str(self.cfg["memory"]["db_path"]))
                 ms = mem.stats()
                 lines.append(f"  总记忆条数：{ms['total']}")
                 if ms["earliest"]:
@@ -759,7 +1113,7 @@ class ConsoleApp:
     def _cleanup_expired(self) -> None:
         """清理过期记忆。"""
         try:
-            mem = Memory(str(ROOT / "data" / "memory.db"))
+            mem = Memory(str(self.cfg["memory"]["db_path"]))
             count = mem.cleanup_expired()
             mem.close()
             messagebox.showinfo("清理完成", f"已清理 {count} 条过期记忆。")
@@ -802,14 +1156,24 @@ class ConsoleApp:
         self.btn_selftest.configure(state="disabled")
         self.tool_box.configure(state="normal")
         self.tool_box.delete("1.0", "end")
-        self.tool_box.insert("end", f"运行中：python main.py {flag} …\n\n")
+        self.tool_box.insert("end", f"运行中：main.py {flag} …\n\n")
         self.tool_box.configure(state="disabled")
 
         def work():
             env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            if is_frozen():
+                # 打包后没有 python 和 main.py，改为调用同目录的「流萤助手.exe」
+                helper = APP_ROOT / "流萤助手.exe"
+                if not helper.exists():
+                    self.ui.put(("log_line", f"找不到 {helper}，无法运行该项检查。"))
+                    self.ui.put(("log_line", "请把「流萤助手.exe」和本程序放在同一个目录。"))
+                    self.ui.put(("tool_done", 1))
+                    return
+                cmd = [str(helper), flag]
+            else:
+                cmd = [sys.executable, "main.py", flag]
             proc = subprocess.Popen(
-                [sys.executable, "main.py", flag],
-                cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
+                cmd, cwd=str(APP_ROOT), env=env, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
             )
             for line in proc.stdout or []:
@@ -947,7 +1311,7 @@ def main() -> int:
         print("当前 Python 缺少 tkinter，无法打开控制台。请用系统 Python 或完整版 Python 运行。")
         return 1
     try:
-        ConsoleApp()
+        app = ConsoleApp()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         try:
@@ -955,6 +1319,11 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             pass
         return 1
+    # 必须进入事件循环，否则窗口会一闪而过（关窗/托盘退出时 destroy() 会让它返回）
+    try:
+        app.root.mainloop()
+    except KeyboardInterrupt:
+        pass
     return 0
 
 

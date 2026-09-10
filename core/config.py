@@ -1,6 +1,13 @@
-"""配置加载：全部配置来自本地 config.json，路径基于项目根目录解析。"""
+"""配置加载：全部配置来自本地 config.json，路径基于项目根目录解析。
+
+「项目根」的判定顺序（见 resolve_root）：
+  显式参数 > 环境变量 FAIRY_ROOT > exe 所在目录（PyInstaller 打包后） > 本包的上级目录
+打包成 exe 后，数据/日志/记忆库一律写在 **exe 同级目录**，而不是临时解包目录。
+"""
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,13 +18,21 @@ DEFAULT_CONFIG_PATH = ROOT / "config.json"
 ROOT_ENV = "FAIRY_ROOT"
 
 
+def is_frozen() -> bool:
+    """是否运行在 PyInstaller 打包出来的 exe 里。"""
+    return bool(getattr(sys, "frozen", False))
+
+
 def resolve_root(root: str | os.PathLike | None = None) -> Path:
-    """决定「项目根」：显式参数 > 环境变量 FAIRY_ROOT > 本包所在目录。"""
+    """决定「项目根」：显式参数 > FAIRY_ROOT > exe 所在目录（打包后） > 本包所在目录。"""
     if root:
         return Path(root).expanduser().resolve()
     env = os.environ.get(ROOT_ENV)
     if env:
         return Path(env).expanduser().resolve()
+    if is_frozen():
+        # 打包后 __file__ 指向临时解包目录，必须改用 exe 自己的位置
+        return Path(sys.executable).resolve().parent
     return ROOT
 
 
@@ -37,6 +52,17 @@ def load_config(path: str | os.PathLike | None = None,
     cfg_path = Path(path) if path else base / "config.json"
     if not Path(cfg_path).is_absolute():
         cfg_path = base / cfg_path
+
+    # 首次运行（常见于刚拿到 exe 时）：没有 config.json 就按模板生成一份，别直接崩
+    if not Path(cfg_path).exists():
+        example = base / "config.example.json"
+        if example.exists():
+            shutil.copyfile(example, cfg_path)
+            sys.stderr.write(f"[流萤] 首次运行：已按模板生成 {cfg_path.name}，"
+                             "请填入 API Key 后重新启动。\n")
+        else:
+            raise FileNotFoundError(f"找不到配置文件：{cfg_path}")
+
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 

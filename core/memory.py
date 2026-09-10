@@ -285,5 +285,75 @@ class Memory:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    # ---------- 记忆管理（控制台「记忆」页用） ----------
+    _DEFAULT_COLS = "id, session_id, role, content, ts, category, importance, tags"
+
+    def _where(self, keyword: str, category: str, min_importance: int,
+               cols: str | None = None) -> tuple[str, list]:
+        sql = (f"SELECT {cols or self._DEFAULT_COLS} FROM messages "
+               "WHERE importance >= ?")
+        params: list = [int(min_importance or 0)]
+        cat = (category or "").strip()
+        if cat and cat != "全部":
+            sql += " AND category = ?"
+            params.append(cat)
+        kw = (keyword or "").strip()
+        if kw:
+            sql += " AND content LIKE ?"
+            params.append(f"%{kw}%")
+        return sql, params
+
+    def categories(self) -> list[str]:
+        """已有的分类清单（给筛选下拉用）。"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT DISTINCT category FROM messages "
+                    "WHERE category IS NOT NULL AND category <> '' ORDER BY category")
+        return [str(r["category"]) for r in cur.fetchall()]
+
+    def query(self, keyword: str = "", category: str = "", min_importance: int = 0,
+              offset: int = 0, limit: int = 50) -> list[dict]:
+        """按关键词 / 分类 / 最低重要度翻页查询（附带分类、重要度、标签）。"""
+        sql, params = self._where(keyword, category, min_importance)
+        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params += [int(limit), int(offset)]
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+    def count_query(self, keyword: str = "", category: str = "",
+                    min_importance: int = 0) -> int:
+        """符合条件的总条数（分页用）。"""
+        sql, params = self._where(keyword, category, min_importance, cols="COUNT(*) AS c")
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return int(cur.fetchone()["c"])
+
+    def delete(self, message_id: int) -> bool:
+        """删除单条记忆（同时清理 FTS 索引）。"""
+        mid = int(message_id)
+        cur = self.conn.cursor()
+        cur.execute("SELECT content FROM messages WHERE id=?", (mid,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        content = row["content"] or ""
+        cur.execute("DELETE FROM messages WHERE id=?", (mid,))
+        if self.fts_ok:
+            try:
+                # 外部内容表的正确删除姿势：必须带上原始内容
+                cur.execute("INSERT INTO messages_fts(messages_fts, rowid, content) "
+                            "VALUES('delete', ?, ?)", (mid, content))
+            except sqlite3.Error:
+                pass
+        self.conn.commit()
+        return True
+
+    def set_tags(self, message_id: int, tags: list[str]) -> None:
+        """整体覆盖某条记忆的标签。"""
+        cur = self.conn.cursor()
+        cur.execute("UPDATE messages SET tags=? WHERE id=?",
+                    (json.dumps(list(tags or []), ensure_ascii=False), int(message_id)))
+        self.conn.commit()
+
     def close(self) -> None:
         self.conn.close()

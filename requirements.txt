@@ -1,0 +1,14 @@
+# 流萤 Fairy · 运行依赖（Python 3.13）
+# 安装：.venv\Scripts\python.exe -m pip install -r requirements.txt
+requests>=2.31
+numpy>=1.26
+sounddevice>=0.4.6
+pillow>=10.0
+pystray>=0.19
+
+# —— 可选（不装会自动降级，不影响主流程）——
+# pvporcupine>=3.0   # 真·语音唤醒「Hi Fairy」；没装则用空格键兜底
+# psutil>=5.9        # 系统信息里显示 CPU / 内存 / 磁盘
+
+# —— 仅打包 exe 时需要 ——
+# pyinstaller>=6.22

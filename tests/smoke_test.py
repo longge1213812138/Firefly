@@ -297,13 +297,22 @@ def run_selftest(cfg: dict) -> int:
         import json as _json
         import subprocess as _sp
 
+        # 打包后没有 python 和 fairy_api.py，改用同目录的「流萤接口.exe」
+        if getattr(sys, "frozen", False):
+            exe = Path(sys.executable).resolve().parent / "流萤接口.exe"
+            if not exe.exists():
+                return True, "（打包目录里没有 流萤接口.exe，跳过该项）"
+            base, workdir = [str(exe)], str(exe.parent)
+        else:
+            base, workdir = [sys.executable, "fairy_api.py"], str(_ROOT)
+
         tmp_cfg = tmp_dir / "selftest_config.json"
         tmp_cfg.write_text(_json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
         env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
         results = []
         for cmd in (["ping"], ["persona"], ["context", "--query", ""]):
-            p = _sp.run([sys.executable, "fairy_api.py", "--config", str(tmp_cfg), *cmd],
-                        cwd=str(_ROOT), env=env, capture_output=True, text=True,
+            p = _sp.run([*base, "--config", str(tmp_cfg), *cmd],
+                        cwd=workdir, env=env, capture_output=True, text=True,
                         encoding="utf-8", errors="replace", timeout=90)
             try:
                 obj = _json.loads((p.stdout or "").strip().splitlines()[-1])
@@ -395,6 +404,62 @@ def run_selftest(cfg: dict) -> int:
               and len(no_instr) == 1 and no_instr[0]["role"] == "assistant")
         return ok, f"有指令={[m['role'] for m in with_instr]}｜无指令={[m['role'] for m in no_instr]}"
 
+    # 24. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
+    def t_memory_admin():
+        from core.memory import Memory
+
+        with tempfile.TemporaryDirectory() as td:
+            mem = Memory(str(Path(td) / "a.db"))
+            mem.add("s1", "user", "我明天要去北京出差", category="待办", importance=8)
+            mem.add("s1", "assistant", "好的，我记下了", category="对话", importance=3)
+            mem.add("s1", "user", "北京烤鸭真好吃", category="对话", importance=5)
+            cats = mem.categories()
+            n_all = mem.count_query()
+            n_hi = mem.count_query(min_importance=8)
+            n_cat = mem.count_query(category="待办")
+            n_kw = mem.count_query(keyword="北京")
+            n_cat_hi = len(mem.query(category="对话", min_importance=4))
+            page1 = mem.query(offset=0, limit=2)
+            page2 = mem.query(offset=2, limit=2)
+            mid = page1[0]["id"]
+            deleted = mem.delete(mid)
+            n_after = mem.count_query()
+            miss = mem.delete(999999)
+            mem.close()
+        ok = (set(cats) == {"待办", "对话"} and n_all == 3 and n_hi == 1 and n_cat == 1
+              and n_kw == 2 and n_cat_hi == 1 and len(page1) == 2 and len(page2) == 1
+              and deleted and n_after == 2 and (not miss))
+        return ok, (f"分类={sorted(cats)} 总数={n_all} 重要度≥8={n_hi} 待办={n_cat} "
+                    f"含北京={n_kw} 分页={len(page1)}+{len(page2)} 删后={n_after}")
+
+    # 25. 打包（冻结模式）下项目根指向 exe 同级目录
+    def t_frozen_root():
+        from core import config as cfgmod
+
+        saved_exe = sys.executable
+        had_frozen = hasattr(sys, "frozen")
+        saved_frozen = getattr(sys, "frozen", None)
+        try:
+            sys.frozen = True
+            sys.executable = str(tmp_dir / "流萤控制台.exe")
+            frozen_root = cfgmod.resolve_root()
+            frozen_flag = cfgmod.is_frozen()
+        finally:
+            if had_frozen:
+                sys.frozen = saved_frozen
+            else:
+                try:
+                    del sys.frozen
+                except AttributeError:
+                    pass
+            sys.executable = saved_exe
+        # 显式参数优先级最高（打包与非打包环境都成立）
+        explicit = cfgmod.resolve_root(tmp_dir)
+        want = str(Path(tmp_dir).resolve())
+        ok = (str(frozen_root) == want and frozen_flag and str(explicit) == want)
+        return ok, (f"冻结时根={Path(frozen_root).name}｜is_frozen={frozen_flag}"
+                    f"｜显式参数生效={str(explicit) == want}")
+
     for name, fn in [
         ("配置与人设加载", t_config),
         ("记忆写入与中文检索", t_memory),
@@ -419,6 +484,8 @@ def run_selftest(cfg: dict) -> int:
         ("情绪持久化（重启可读）", t_emotion_persist),
         ("MiMo风格指令（导演模式）", t_emotion_style),
         ("TTS消息结构符合官方规范", t_tts_messages),
+        ("记忆管理（筛选/翻页/删除）", t_memory_admin),
+        ("打包后项目根指向exe目录", t_frozen_root),
     ]:
         check(name, fn)
 

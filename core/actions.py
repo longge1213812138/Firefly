@@ -12,8 +12,10 @@ from datetime import datetime
 from pathlib import Path
 
 from . import safety
+from .config import resolve_root
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 打包成 exe 后要指向 exe 所在目录（受保护目录判断要用）
+PROJECT_ROOT = resolve_root()
 
 DESCRIPTIONS = (
     "可用操作（在回复最后另起一行输出 ACTION:{\"name\":\"操作名\",\"args\":{...}} 来调用，可多行一次提交批量操作）：\n"
