@@ -1,6 +1,11 @@
-# 批处理文件是 GBK 编码 + CRLF 行尾，Git 若做换行转换会导致 cmd 闪退/乱码，
-# 因此按二进制处理，禁止任何转换。
-*.bat binary
-
 # 其余文本统一 LF 提交，本地按系统换行
 * text=auto
+
+# 批处理文件是 GBK 编码 + CRLF 行尾，Git 若做换行转换会导致 cmd 闪退/乱码，
+# 因此按二进制处理，禁止任何转换。
+#
+# ⚠️ 本规则必须写在 `* text=auto` 之后，不能调换！
+#    Git 属性是「后出现者覆盖前者」：若 *.bat 写在前面，会被后面的
+#    * text=auto 覆盖，导致 bat 的 CRLF 在仓库内被规范化成 LF ——
+#    换机 clone 或从 GitHub 下载 ZIP 后，双击 bat 会 cmd 解析错位直接闪退。
+*.bat binary
