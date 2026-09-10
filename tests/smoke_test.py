@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import wave
 from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -230,6 +233,84 @@ def run_selftest(cfg: dict) -> int:
         tk_ok = gui.tk is not None
         return not missing and tk_ok, f"缺失={missing}｜tkinter 可用={tk_ok}"
 
+    # 15. 外部 agent 后端注册表与参数拼装（离线，不真的调 Pi）
+    def t_agent_backend():
+        from core import agent_backend
+
+        b = agent_backend.get_backend("pi", cfg)
+        ok1 = b is not None and b.name == "pi"
+        argv_ro = b.build_argv("改一下 README", read_only=True) if b else []
+        ok2 = ("-p" in argv_ro and "--tools" in argv_ro and "read,grep,find,ls" in argv_ro
+               and argv_ro[-1] == "改一下 README" and "--" in argv_ro
+               and "--print-turn" not in argv_ro)
+        argv_rw = b.build_argv("x", read_only=False) if b else []
+        ok3 = "--tools" not in argv_rw
+        names = list(agent_backend.list_backends(cfg))
+        ok4 = "pi" in names
+        avail = b.available() if b else None
+        ok5 = isinstance(avail, bool)
+        return (ok1 and ok2 and ok3 and ok4 and ok5,
+                f"注册={names}｜只读带--tools={('--tools' in argv_ro)}｜"
+                f"可写不加--tools={('--tools' not in argv_rw)}｜可用={avail}")
+
+    # 16. pi_agent 是硬闸口：每次当面确认，自动流程绕不过
+    def t_pi_safety():
+        from core import actions, safety
+
+        args = {"task": "帮我重构 src/", "backend": "pi"}
+        h = safety.is_hard(cfg, "pi_agent", args)
+        c = safety.needs_confirm(cfg, "pi_agent", args)
+        ok, out = actions.execute(cfg, {"name": "pi_agent", "args": args},
+                                  auto_confirm=True, confirm_fn=lambda p: False)
+        blocked = (not ok) and ("取消" in str(out))
+        prompt = safety.format_confirm_list([{"name": "pi_agent", "args": args}])
+        return (h and c and blocked and "调用 Pi" in prompt,
+                f"硬闸口={h} 需确认={c} 拒绝后拦截={blocked}")
+
+    # 17. pi_agent 参数校验：未知后端 / 空任务都要优雅失败
+    def t_pi_args():
+        from core import actions
+
+        ok1, msg1 = actions._run("pi_agent", {"task": "x", "backend": "不存在的后端"}, cfg)
+        ok2, msg2 = actions._run("pi_agent", {"backend": "pi"}, cfg)
+        return ((not ok1) and ("未知" in msg1) and (not ok2) and ("task" in msg2),
+                f"未知后端→{msg1[:26]}｜空任务→{msg2[:22]}")
+
+    # 18. 删除文件真的能删（回归此前 _protected 引用未导入常量的 bug）
+    def t_delete_file():
+        from core import actions
+
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "待删.txt"
+            f.write_text("x", encoding="utf-8")
+            ok, out = actions._run("delete_file", {"path": str(f)})
+            gone = not f.exists()
+            denied, msg = actions._run("delete_file", {"path": "C:/"})
+        return (ok and gone and (not denied) and ("保护" in str(msg)),
+                f"临时文件已删除={gone}｜受保护目录拒删={not denied}")
+
+    # 19. 对外接口（fairy_api）单行 JSON 协议
+    def t_api_protocol():
+        import json as _json
+        import subprocess as _sp
+
+        tmp_cfg = tmp_dir / "selftest_config.json"
+        tmp_cfg.write_text(_json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        results = []
+        for cmd in (["ping"], ["persona"], ["context", "--query", ""]):
+            p = _sp.run([sys.executable, "fairy_api.py", "--config", str(tmp_cfg), *cmd],
+                        cwd=str(_ROOT), env=env, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=90)
+            try:
+                obj = _json.loads((p.stdout or "").strip().splitlines()[-1])
+                ok = (p.returncode == 0 and obj.get("ok") is True
+                      and len((p.stdout or "").strip().splitlines()) == 1)
+            except Exception:  # noqa: BLE001
+                ok = False
+            results.append(ok)
+        return all(results), f"ping/persona/context 单行JSON合法={results}"
+
     for name, fn in [
         ("配置与人设加载", t_config),
         ("记忆写入与中文检索", t_memory),
@@ -245,6 +326,11 @@ def run_selftest(cfg: dict) -> int:
         ("批量 ACTION 解析（撤销清单）", t_extract_actions),
         ("桌宠状态机", t_pet_brain),
         ("GUI 模块（tkinter）", t_gui_module),
+        ("外部agent后端注册与参数拼装", t_agent_backend),
+        ("pi_agent 硬闸口", t_pi_safety),
+        ("pi_agent 参数校验", t_pi_args),
+        ("删除文件真正可用（回归修复）", t_delete_file),
+        ("对外接口单行JSON协议", t_api_protocol),
     ]:
         check(name, fn)
 

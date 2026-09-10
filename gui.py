@@ -133,9 +133,13 @@ class ChatWorker(threading.Thread):
                     f.confirm_fn = self.confirm
                     f.on_state = lambda s: self.ui.put(("pet_state", s))
                     self.ui.put(("chat_user", text))
-                    self.ui.put(("status", "思考中…"))
                     t0 = time.time()
-                    reply = f.respond(text)
+                    if text.startswith("/pi"):
+                        self.ui.put(("status", "正在调用 Pi…（长任务可能几分钟，请稍候）"))
+                        reply = f.run_pi_task(text[3:])
+                    else:
+                        self.ui.put(("status", "思考中…"))
+                        reply = f.respond(text)
                     self.ui.put(("chat_fairy", f"{reply}"))
                     self.ui.put(("status", f"就绪｜本轮 {time.time()-t0:.1f}s"))
                 elif kind == "voice_input":
@@ -227,7 +231,9 @@ class ConsoleApp:
         ):
             self.chat_box.tag_configure(tag, foreground=color, **kw)
         self._chat_append("sys", "这里是和 Fairy 聊天的地方（与语音模式共用同一份记忆）。"
-                                 "涉及删除/覆盖/外发的操作会先弹窗让你确认。\n")
+                                 "涉及删除/覆盖/外发的操作会先弹窗让你确认。\n"
+                                 "想让 Pi 帮忙：输入「/pi 任务」，例如「/pi 帮我看看这个项目的结构」"
+                                 "（只在明确要求时调用，且每次都会弹窗确认）。\n")
 
         row = ttk.Frame(f)
         row.pack(fill="x", padx=8, pady=(2, 2))

@@ -16,7 +16,8 @@ from datetime import datetime
 from pathlib import Path
 
 # 硬闸口动作：本质不可逆/外发，永远需要当面确认
-HARD_ACTIONS = {"delete_file", "delete_dir", "send_file", "send_message"}
+# pi_agent 会驱动外部 agent 读写文件、执行命令，效果等价于不可逆操作，故列为硬闸口
+HARD_ACTIONS = {"delete_file", "delete_dir", "send_file", "send_message", "pi_agent"}
 # 命令行中出现这些词 → 硬闸口
 HARD_CMD_KEYWORDS = (
     "rm ", "rm -", "del ", "del/", "rd ", "rmdir", "erase",
@@ -63,6 +64,7 @@ def needs_confirm(cfg: dict, action_name: str, args: dict) -> bool:
         "write_file", "run_command", "delete", "send",
         "delete_file", "delete_dir", "move_file", "copy_file", "send_file", "send_message",
         "batch_rename", "organize_files", "compress_files", "extract_archive",
+        "pi_agent",
     }
     if name in dangerous_actions:
         return True
@@ -95,6 +97,9 @@ def format_confirm_list(actions: list[dict]) -> str:
             lines.append(f"  {i}. {verb}：{args.get('src', '')} → {args.get('dst', '')}")
         elif name in ("delete_file", "delete_dir"):
             lines.append(f"  {i}. 删除{'目录' if name == 'delete_dir' else '文件'}：{args.get('path', '')}")
+        elif name == "pi_agent":
+            ro = "（只读）" if args.get("read_only") else "（可读写，会动文件/命令）"
+            lines.append(f"  {i}. 调用 Pi 完成：{str(args.get('task', ''))[:160]}{ro}")
         else:
             lines.append(f"  {i}. {name}：{json.dumps(args, ensure_ascii=False)[:120]}")
     lines.append("确认执行吗？（删除/覆盖/外发类操作必须当面确认，无法跳过）")

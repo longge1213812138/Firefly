@@ -7,7 +7,10 @@
   python main.py --search 关键词   检索历史对话
   python main.py --selftest   离线自检（不联网）
   python main.py --pet        只启动桌宠
+  python main.py --pi-check   外部 agent（Pi）体检
   python gui.py               图形控制台（对话/记忆/配置/状态）
+
+对话中想让 Pi 帮忙，输入 /pi <任务>（仅在用户明确要求时才调用，且每次都会当面确认）。
 """
 from __future__ import annotations
 
@@ -129,6 +132,63 @@ class Fairy:
         finally:
             self._set_state("idle")
 
+    # ---------- 显式调用外部 agent（Pi） ----------
+    def run_pi_task(self, task: str) -> str:
+        """用户明确要求时，把任务交给外部 agent（默认 Pi）。
+
+        长期记忆只在陪伴端：这里只把任务转出去，结果回来后写进**陪伴端自己的**记忆。
+        该动作是硬闸口——每次调用都必须当面确认。
+        """
+        from core import agent_backend
+
+        task = (task or "").strip()
+        if not task:
+            return "想让 Pi 做什么？可以这样写：/pi 帮我看看这个项目的结构"
+
+        backend_name = str(self.cfg.get("pi", {}).get("backend") or "pi")
+        backend = agent_backend.get_backend(backend_name, self.cfg)
+        if backend is None:
+            return f"没有注册名为「{backend_name}」的 agent 后端。"
+        if not backend.available():
+            return (f"没找到可用的 {backend_name} 命令行——{backend.describe()}\n"
+                    "（请先安装 Pi，或在 config.json 的 pi.cli_path 填绝对路径）")
+
+        prompt = (f"即将调用「{backend_name}」执行任务：\n  {task}\n"
+                  "它会读写文件、执行命令，可能改动你的项目。")
+        confirm = self.confirm_fn or safety.confirm_interactive
+        self.memory.add(self.session_id, "user", f"/pi {task}")
+        if not confirm(prompt):
+            safety.audit(self.cfg, {"session_id": self.session_id, "action": "pi_agent",
+                                    "args": {"task": task, "backend": backend_name},
+                                    "result": "用户拒绝", "risk": "high", "hard": True})
+            return "好，那我不调用 Pi 了。"
+
+        self._set_state("thinking")
+        if self.verbose:
+            print(f"  🔧 正在调用 {backend_name}……（长任务可能几分钟，请稍候）", flush=True)
+        try:
+            res = backend.run(
+                task,
+                read_only=bool(self.cfg.get("pi", {}).get("read_only", False)),
+            )
+        finally:
+            self._set_state("idle")
+
+        safety.audit(self.cfg, {"session_id": self.session_id, "action": "pi_agent",
+                                "args": {"task": task, "backend": backend_name},
+                                "result": ("成功" if res.ok else "失败") + f"｜耗时 {res.duration:.1f}s",
+                                "risk": "high", "hard": True})
+        if not res.ok:
+            note = f"Pi 没能完成：{res.error or '无输出'}"
+            self.memory.add(self.session_id, "assistant", note)
+            return note
+
+        self.stats.record_action("pi_agent")
+        # 结果写进陪伴端自己的记忆（截断，免得超长 diff 撑爆记忆库）
+        summary = res.text if len(res.text) <= 2000 else res.text[:2000] + "…（已截断）"
+        self.memory.add(self.session_id, "assistant", f"（Pi 的任务结果）{summary}", category="笔记")
+        return res.text
+
     # ---------- 语音链路 ----------
     def listen(self) -> str:
         a = self.cfg["audio"]
@@ -245,6 +305,11 @@ class Fairy:
                     if not user_text or is_wake_phrase(user_text):
                         continue
                 print(f"\n🗣 你：{user_text}", flush=True)
+                if user_text.startswith("/pi"):
+                    out = self.run_pi_task(user_text[3:])
+                    spoken = out if len(out) <= 200 else out[:200] + "……内容比较长，我就不全念了。"
+                    self.say(spoken)
+                    continue
                 if _is_exit(user_text):
                     self.say("好，我先去休息啦，随时叫我。")
                     break
@@ -278,6 +343,7 @@ class Fairy:
 
     def run_text(self) -> None:
         print("\n【键盘模式】直接打字回车即可对话；输入 q 退出。", flush=True)
+        print("   想让 Pi 帮忙：输入 /pi 任务（例如「/pi 帮我看看这个项目的结构」）", flush=True)
         print(f"   会话 ID：{self.session_id}｜历史记忆：{self.memory.count()} 条\n", flush=True)
         while True:
             try:
@@ -288,6 +354,11 @@ class Fairy:
                 continue
             if user_text.lower() in ("q", "quit", "exit"):
                 break
+            if user_text.startswith("/pi"):
+                t0 = time.time()
+                reply = self.run_pi_task(user_text[3:])
+                print(f"\n🧚 Fairy（{time.time()-t0:.1f}s）：{reply}\n", flush=True)
+                continue
             t0 = time.time()
             try:
                 reply = self.respond(user_text)
@@ -376,6 +447,23 @@ def mic_test(cfg: dict) -> None:
     print(f"建议 config.json 的 silence_threshold 设为：{suggest}（当前 {a.get('silence_threshold')}）")
 
 
+def pi_check(cfg: dict) -> None:
+    """外部 agent（Pi）体检：命令行是否可用、配置是否合理。"""
+    from core import agent_backend
+
+    print("\n=== 外部 Agent（Pi）体检 ===")
+    pcfg = cfg.get("pi", {}) or {}
+    print(f"配置：enabled={pcfg.get('enabled', True)}｜cli_path={pcfg.get('cli_path') or '(自动在 PATH 查找)'}")
+    print(f"      cwd={pcfg.get('cwd')}｜read_only={pcfg.get('read_only', False)}｜timeout={pcfg.get('timeout', 600)}s")
+    backends = agent_backend.list_backends(cfg)
+    if not backends:
+        print("❌ 没有注册任何后端")
+        return
+    for name, b in backends.items():
+        print(f"{'✅' if b.available() else '❌'} 后端 {name}：{b.describe()}")
+    print("\n提示：只有用户明确输入 /pi <任务>（或点名要求）时才会调用 Pi；平时陪伴端完全独立运行。")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fairy 本地语音助手")
     ap.add_argument("--text", action="store_true", help="键盘输入模式")
@@ -387,6 +475,7 @@ def main() -> int:
     ap.add_argument("--diag", action="store_true", help="云端服务体检（分别测 ASR/TTS/LLM）")
     ap.add_argument("--pet", action="store_true", help="只启动桌宠（不进入语音对话）")
     ap.add_argument("--stats", action="store_true", help="查看使用统计")
+    ap.add_argument("--pi-check", action="store_true", help="外部 agent（Pi）体检")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -440,6 +529,10 @@ def main() -> int:
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
             print(f"  [{ts}] {h['role']}：{h['content'][:120]}")
         mem.close()
+        return 0
+
+    if args.pi_check:
+        pi_check(cfg)
         return 0
 
     if args.selftest:

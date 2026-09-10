@@ -16,6 +16,7 @@
 | 桌宠      | ✅ 可用     | 小萤火虫「流萤」常驻桌面：待机呼吸 / 聆听波纹 / 思考转星 / 说话口型四态动画；可拖拽、贴边隐藏、右键菜单；双击预览四种状态                             |
 | 控制台 GUI | ✅ 可用     | 双击 `控制台.bat`：五页标签——文字聊天（危险操作弹窗确认）、历史记忆检索、API Key/模型/音色配置（Key 掩码不回显）、**使用统计**（对话次数/操作频率/分类分布/记忆库信息）、人设编辑器、开机自启、体检与审计日志。关闭窗口自动最小化到系统托盘，右键托盘图标可恢复或退出 |
 | 声线 / 性格 | ✅ 已预留    | 人设改 `persona/default.md` 或控制台里直接编辑（保存即生效）；音色改 `tts.voice`，后期换 voicedesign/voiceclone 型号即可克隆声线 |
+| 与 Pi 协作 | ✅ 可选 | 平时**完全独立运行、不依赖 Pi**；只有你**明确要求**时才调用本机 `pi` 命令行（对话里输入 `/pi 任务`，或点名"用 Pi 帮我…"），且**每次都会先确认**。长期记忆只存流萤这边，**不与 Pi 共享** |
 
 ---
 
@@ -23,7 +24,7 @@
 
 | 脚本           | 作用                                     |
 | ------------ | -------------------------------------- |
-| `启动助手.bat`   | 先自检（10 项全绿才继续），再进入待命（桌宠随语音模式一起出现）      |
+| `启动助手.bat`   | 先自检（19 项全绿才继续），再进入待命（桌宠随语音模式一起出现）      |
 | `控制台.bat`    | 图形控制台：聊天、记忆检索、配置管理、体检与审计日志             |
 | `桌宠.bat`     | 只启动桌宠小萤火虫（不进入语音对话）                     |
 | `键盘对话模式.bat` | 打字对话，不依赖麦克风，排查用                        |
@@ -90,7 +91,7 @@ ASR 已做成可插拔。想换别家，改 `config.json` 里的 `asr` 段：
 
 ### 第 2 步：双击 `启动助手.bat`
 
-它会先跑一遍自检（14 项，全绿才继续），然后进入待命状态。
+它会先跑一遍自检（19 项，全绿才继续），然后进入待命状态。
 
 ### 第 3 步：按【空格】说话
 
@@ -110,6 +111,34 @@ python main.py --devices     # 查看麦克风/喇叭设备编号（声音不对
 python main.py --search 豆豆  # 检索历史对话
 python main.py --no-speak    # 只显示文字不播报（省 API 额度）
 python main.py --stats       # 查看使用统计（对话次数/操作频率/分类分布）
+python main.py --pi-check    # 体检：本机 pi 命令行是否可用
+```
+
+### 让 Pi 帮忙（`/pi`，可选）
+
+在**键盘模式**或**控制台对话框**里输入：
+
+```
+/pi 帮我看看这个项目的结构
+/pi 把 README 里的错别字改一下
+```
+
+- 只有你这样**明确要求**时才会调用本机 `pi` 命令行；平时流萤**完全独立运行、不依赖 Pi**
+- 每次调用前都会**当面确认**（这属于硬闸口，自动流程绕不过）
+- 想让 Pi 只读不写：把 `config.json` 的 `pi.read_only` 设为 `true`（只给 `read/grep/find/ls` 工具）
+- **长期记忆只存在流萤这边**，不与 Pi 共享；Pi 的结果会作为"笔记"记进流萤自己的记忆库
+- 体检：`python main.py --pi-check`（或看 `config.json` 的 `pi` 段）
+
+#### 对外接口（给外部程序调用）
+
+若你想让别的程序/Pi 扩展反过来调用流萤，用 `fairy_api.py`（stdout 单行 JSON）：
+
+```bash
+python fairy_api.py ping                      # 健康检查
+python fairy_api.py context --query 关键词     # 取"人设+相关往事"整块
+python fairy_api.py remember --role user --text "记住这句话"
+python fairy_api.py say --text "用流萤的声音念这句"
+python fairy_api.py search --query 豆豆        # 检索历史记忆
 ```
 
 设备不对时，在 `config.json` 的 `audio.input_device` / `output_device` 填 `--devices` 查到的编号（不填则使用系统默认设备）。
@@ -165,7 +194,7 @@ python main.py --stats       # 查看使用统计（对话次数/操作频率/�
 | **按空格没反应**            | ① 黑窗口被鼠标点过会进「标记模式」吞按键 → 按 **Esc** 解除；② 当前是空格键兜底模式，**按空格后直接说话，不用喊 Hi Fairy**；③ 跑 `麦克风体检.bat` 看是不是没收到声音          |
 | **喊「Hi Fairy」没反应**    | 没配 Picovoice 时**不会**本地识别唤醒词；但已加云端兜底——你说的话被识别成"Hi Fairy"时，助手会回一句"我在呢"并接着听你说。想要真·本地唤醒见第四节                        |
 | 说"未配置 API Key"        | `config.json` 里 `mimo.api_key` / `llm.api_key` 没填                                                              |
-| 需要装 pi-mono 吗         | **不需要**。当前 MVP 是纯 Python，与 pi-mono 无关；pi-mono 是后续做「Agent 内核/更强电脑接管」时才引入，且它是 Node/TypeScript 项目，与 Python 主程序是两层 |
+| 需要装 Pi 吗            | **不装也能用**。流萤平时完全独立运行，只在你说 `/pi 任务`（或点名"用 Pi 帮我"）时才去调本机 `pi` 命令行。没装或没配好时，`/pi` 会明确提示"没找到 pi 命令"，其余功能一切照常 |
 | **回复时最后两三个字没念出来**     | 蓝牙耳机/部分声卡的"尾部截断"毛病，已自动补 0.8 秒静音垫底。仍被截就把 `config.json` 里 `audio.output_tail_silence` 调大到 1.0~1.5                |
 | 听不到我说话 / 识别全是空白       | `python main.py --devices` 找到你的麦克风编号，填进 `audio.input_device`；安静环境把 `silence_threshold` 调小到 0.008               |
 | 话没说完就被截断              | 把 `audio.tail_silence_seconds` 调大到 1.5~2.0                                                                     |
@@ -180,7 +209,9 @@ python main.py --stats       # 查看使用统计（对话次数/操作频率/�
 ```
 fairy/
 ├─ main.py              入口（对话编排 / 唤醒 / 主循环）
-├─ config.json          全部配置（Key、麦克风、灵敏度、安全策略）
+├─ gui.py               图形控制台（tkinter）
+├─ fairy_api.py         对外接口：给外部程序/Pi 扩展调用的单行 JSON CLI
+├─ config.json          全部配置（Key、麦克风、灵敏度、安全策略、pi 段）
 ├─ persona/default.md   人设（性格、说话风格）
 ├─ core/
 │  ├─ memory.py         记忆：SQLite 持久化 + 中文检索 + 召回
@@ -189,10 +220,14 @@ fairy/
 │  ├─ llm.py            大脑：OpenAI 兼容接口 + 动作指令解析
 │  ├─ audio_io.py       录音（自动断句）/ 播放
 │  ├─ wake.py           唤醒：Porcupine + 空格键兜底
-│  ├─ actions.py        电脑操作工具集
+│  ├─ pet.py            桌宠「小萤火虫流萤」四态动画
+│  ├─ actions.py        电脑操作工具集（含 pi_agent）
+│  ├─ agent_backend.py  外部 agent 后端注册表（出站扩展点）+ PiCliBackend
+│  ├─ config.py         配置加载（支持 FAIRY_ROOT 覆盖）
+│  ├─ stats.py          使用统计
 │  └─ safety.py         安全闸口 + 审计日志
 ├─ data/                记忆库与日志（运行时生成）
-├─ tests/smoke_test.py  离线自检用例
+├─ tests/smoke_test.py  离线自检用例（19 项）
 └─ 启动助手.bat         一键启动
 ```
 
@@ -206,8 +241,9 @@ fairy/
 4. ~~声线切换~~ ✅ 已完成（GUI 配置页支持预置音色 / voicedesign 文字设计 / voiceclone 音频复刻）
 5. ~~电脑操作增强~~ ✅ 已完成（新增搜索/批量重命名/文件整理/压缩解压/系统信息）
 6. ~~记忆增强~~ ✅ 已完成（分类/重要度/标签/过期/统计）
-7. 使用统计（`python main.py --stats`，GUI 状态页展示）
-8. openWakeWord 自训练「Hi Fairy」（彻底离线唤醒，摆脱 Picovoice Key）
-5. 全权接管的安全放开（在硬闸口框架下逐步开放更多操作，如批量整理文件）
-6. openWakeWord 自训练「Hi Fairy」（彻底离线唤醒，摆脱 Picovoice Key）
+7. ~~使用统计~~ ✅ 已完成（`python main.py --stats`，GUI 状态页展示）
+8. ~~与 Pi 协作~~ ✅ 已完成（按需调用 `pi` CLI：`/pi 任务`，每次确认，记忆不共享）
+9. 对外接口硬化（协议版本号 / 注入体量可选），为将来做 Pi 扩展铺路
+10. 全权接管的安全放开（在硬闸口框架下逐步开放更多操作，如批量整理文件）
+11. openWakeWord 自训练「Hi Fairy」（彻底离线唤醒，摆脱 Picovoice Key）
 

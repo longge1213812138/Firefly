@@ -8,6 +8,18 @@
 
 ## 版本记录
 
+### v0.3.0（按需调用 Pi + 双扩展接口）
+
+- ✅ **与 Pi 协作（可选，默认独立）**：陪伴端平时完全独立运行、不依赖 Pi；只有用户**明确要求**时才调用本机 `pi` 命令行。触发方式两种：对话里输入 `/pi <任务>`（键盘模式 / 控制台），或点名"用 Pi 帮我…"由模型按人设判断发出 `pi_agent` 动作
+- ✅ **出站扩展点** `core/agent_backend.py`：`AgentBackend` 可插拔注册表（`register_backend` / `get_backend` / `list_backends`）+ `PiCliBackend`（自动探测 CLI、拼装参数、带超时的子进程执行、逐行流式回调、Windows `pi.cmd` 适配）
+- ✅ **入站扩展点** `fairy_api.py`：给外部程序 / Pi 扩展调用的单行 JSON CLI（`ping` / `context` / `remember` / `say` / `search` / `persona` / `ask`），stdout 单行 JSON、日志走 stderr、退出码 0/1/2
+- ✅ **安全**：`pi_agent` 登记为**硬闸口**（每次必须当面确认，自动流程绕不过），并写入审计日志；`config.json` 的 `pi.read_only=true` 可只授予读类工具（`read,grep,find,ls`）
+- ✅ **记忆不共享**：长期记忆只在陪伴端；Pi 只是被调用方，其结果作为"笔记"记回流萤自己的记忆库
+- ✅ **修复**：`core/actions.py` 的 `_protected()` 引用了未导入的 `PROTECTED_PATHS`，导致 `delete_file` / `delete_dir` **从未真正执行过**（自检第 11 项因"失败即拦截"而误判通过）——已修复并新增回归用例
+- ✅ **解耦**：`core/config.py` 支持 `FAIRY_ROOT` 环境变量覆盖项目根（不设时行为不变）；`core/memory.py` 启用 WAL + busy_timeout，支持多进程并发访问
+- ✅ 新增 `python main.py --pi-check` 外部 agent 体检
+- 🧪 自检 **14 项 → 19 项**，19/19 全绿；端到端实测（拒绝路径 / 只读任务）通过
+
 ### v0.2.0（桌宠 + 控制台 + 安全硬闸口）
 
 - ✅ 桌宠「小萤火虫流萤」（`core/pet.py`，tkinter 零依赖）：待机呼吸 / 聆听波纹 / 思考转星 / 说话口型四态动画；可拖拽、贴边隐藏（鼠标移上恢复）、右键菜单、双击预览四态；随语音模式自动出现（`pet.enabled` 可关），也可 `python main.py --pet` 或 `桌宠.bat` 单独启动

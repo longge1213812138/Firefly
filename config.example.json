@@ -86,5 +86,17 @@
     "start_y": null
   },
 
+  "pi": {
+    "_说明": "可选：按需调用 Pi 编程智能体 CLI（pi.dev）。平时陪伴端完全独立运行、不依赖 Pi；只有当你在对话里明确要求（输入 /pi 任务，或点名「用 Pi 帮我」）时才会调用，且每次都会让你确认。长期记忆始终只存在陪伴端。",
+    "_字段": "cli_path 留空=自动在 PATH 里找 pi；cwd 留空=项目根；read_only=true 时只给读类工具(read/grep/find/ls)；timeout 秒；mode=text(默认)|json|rpc；extra_args 追加给 pi 的额外参数。",
+    "enabled": true,
+    "cli_path": "",
+    "cwd": "",
+    "read_only": false,
+    "timeout": 600,
+    "mode": "text",
+    "extra_args": []
+  },
+
   "persona_path": "persona/default.md"
 }

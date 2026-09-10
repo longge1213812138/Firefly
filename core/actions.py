@@ -33,8 +33,11 @@ DESCRIPTIONS = (
     "14. compress_files {\"src\":\"源目录或文件\", \"dst\":\"压缩包路径\"} —— 压缩文件/目录为zip（需确认）\n"
     "15. extract_archive {\"src\":\"压缩包路径\", \"dst\":\"解压目标目录\"} —— 解压zip文件（需确认）\n"
     "16. get_system_info 无参数 —— 获取系统信息（CPU/内存/磁盘）\n"
+    "17. pi_agent {\"task\":\"要交给 Pi 的完整任务描述\", \"backend\":\"pi\", \"read_only\":false} —— "
+    "调用 Pi 编程智能体（外部 CLI）完成编程/查资料/改文件类任务（需确认，且属硬闸口）\n"
     "规则：删除、覆盖、外发、付款类操作必须先当面征求用户同意，绝不自作主张；"
-    "批量整理类任务把多个 ACTION 各占一行一起提交，等用户在清单上一次性确认。"
+    "批量整理类任务把多个 ACTION 各占一行一起提交，等用户在清单上一次性确认；"
+    "**pi_agent 只在用户明确点名要求（例如「用 Pi 帮我…」「让 Pi 来做」）时才可发起，绝不能自作主张调用。**"
 )
 
 
@@ -43,13 +46,50 @@ def _protected(p: Path) -> bool:
     try:
         s = str(p.resolve()).lower().rstrip("\\/")
         home = str(Path.home()).lower().rstrip("\\/")
-        prot = tuple(x.rstrip("\\/").lower() for x in PROTECTED_PATHS)
+        prot = tuple(x.rstrip("\\/").lower() for x in safety.PROTECTED_PATHS)
         return s in prot or s == home or s == str(PROJECT_ROOT).lower()
     except OSError:
         return True  # 解析失败一律当保护对象处理
 
 
-def _run(name: str, args: dict) -> tuple[bool, str]:
+def _run_pi_agent(args: dict, cfg: dict | None) -> tuple[bool, str]:
+    """把任务转发给外部 agent（默认 Pi）。
+
+    注意：陪伴端的长期记忆不会被共享出去；
+    这里只做「转发任务 → 取回结果」，调用前后的确认与审计由 execute() 负责。
+    """
+    from . import agent_backend
+
+    task = str(args.get("task", "") or "").strip()
+    if not task:
+        return False, "pi_agent 缺少 task（要交给 Pi 的任务描述）"
+
+    if cfg is None:
+        from .config import load_config
+
+        cfg = load_config()
+    if not cfg.get("pi", {}).get("enabled", True):
+        return False, "config.json 里 pi.enabled=false，已停用外部 agent 调用"
+
+    backend_name = str(args.get("backend") or cfg.get("pi", {}).get("backend") or "pi").strip() or "pi"
+    backend = agent_backend.get_backend(backend_name, cfg)
+    if backend is None:
+        known = ", ".join(agent_backend.list_backends() or []) or "无"
+        return False, f"未知的 agent 后端：{backend_name}（已注册：{known}）"
+    if not backend.available():
+        return False, f"{backend.describe()} 不可用——请先安装，或在 config.json 的 pi.cli_path 填绝对路径"
+
+    res = backend.run(
+        task,
+        read_only=bool(args.get("read_only", False)),
+        cwd=args.get("cwd") or None,
+    )
+    if not res.ok:
+        return False, f"{backend_name} 未能完成：{res.error or '无输出'}"
+    return True, res.text
+
+
+def _run(name: str, args: dict, cfg: dict | None = None) -> tuple[bool, str]:
     try:
         if name == "get_time":
             return True, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -239,6 +279,8 @@ def _run(name: str, args: dict) -> tuple[bool, str]:
             else:
                 info["提示"] = "安装 psutil 可获取更多系统信息：pip install psutil"
             return True, "\n".join(f"{k}：{v}" for k, v in info.items())
+        if name == "pi_agent":
+            return _run_pi_agent(args, cfg)
         return False, f"未知操作：{name}"
     except Exception as exc:  # noqa: BLE001
         return False, f"执行失败：{exc}"
@@ -275,7 +317,7 @@ def execute(
                            "result": "用户拒绝", "risk": "high", "hard": hard})
         return False, "（已取消该操作）"
 
-    ok, out = _run(name, args)
+    ok, out = _run(name, args, cfg)
     safety.audit(cfg, {"session_id": session_id, "action": name, "args": args,
                        "result": ("成功" if ok else "失败") + "｜" + str(out)[:200],
                        "risk": "high" if require else "low", "hard": hard})

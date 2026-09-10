@@ -22,6 +22,12 @@ class Memory:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        # 允许被多个进程（如语音助手 + 控制台 / 外部宿主）同时打开写入，避免 database is locked
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
         self.fts_ok = False
         self._init_schema()
 
