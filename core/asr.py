@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import json
 
-import requests
+from . import http as http_mod
 
 FRIENDLY_ERRORS = {
     401: "API Key 无效或已过期（401）：检查 config.json 里填的 Key 是否完整、有没有多复制空格。",
@@ -53,7 +53,7 @@ class MiMoASR:
             ],
             "asr_options": {"language": self.language},
         }
-        r = requests.post(
+        r = http_mod.session().post(
             f"{self.base_url}/chat/completions",
             headers={"api-key": self.api_key, "Content-Type": "application/json"},
             data=json.dumps(payload),
@@ -85,7 +85,7 @@ class WhisperAPIASR:
         data = {"model": self.model}
         if self.language and self.language != "auto":
             data["language"] = self.language
-        r = requests.post(
+        r = http_mod.session().post(
             f"{self.base_url}/audio/transcriptions",
             headers={"Authorization": f"Bearer {self.api_key}"},
             files=files,

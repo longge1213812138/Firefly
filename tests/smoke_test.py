@@ -297,12 +297,9 @@ def run_selftest(cfg: dict) -> int:
         import json as _json
         import subprocess as _sp
 
-        # 打包后没有 python 和 fairy_api.py，改用同目录的「流萤接口.exe」
+        # 打包后没有 python 和 fairy_api.py，直接调用自己：`流萤.exe api ...`
         if getattr(sys, "frozen", False):
-            exe = Path(sys.executable).resolve().parent / "流萤接口.exe"
-            if not exe.exists():
-                return True, "（打包目录里没有 流萤接口.exe，跳过该项）"
-            base, workdir = [str(exe)], str(exe.parent)
+            base, workdir = [sys.executable, "api"], str(Path(sys.executable).resolve().parent)
         else:
             base, workdir = [sys.executable, "fairy_api.py"], str(_ROOT)
 
@@ -323,7 +320,56 @@ def run_selftest(cfg: dict) -> int:
             results.append(ok)
         return all(results), f"ping/persona/context 单行JSON合法={results}"
 
-    # 20. 情绪模型：词典推断 + 演化 + 边界钳制（离线，不调大模型）
+    # 20. 流式分句器：按标点切句 + 过滤 ACTION 行（离线，纯函数）
+    def t_sentence_buffer():
+        from core.sentence_buffer import SentenceBuffer
+
+        buf = SentenceBuffer(min_len=4, max_buf=40)
+        out: list[str] = []
+        # 逐段喂入，模拟流式 delta
+        for delta in ["今天天气", "不错，", "适合出去走走。\nACTION:{\"name\":\"get_time\"}", " 好。"]:
+            out += buf.feed(delta)
+        out += buf.flush()
+        joined = "".join(out)
+        ok = ("今天天气不错，适合出去走走。" in out or "不错，适合出去走走。" in out) \
+            and ("ACTION" not in joined) and buf.dropped_action
+        return ok, f"分句={out} 过滤ACTION={buf.dropped_action}"
+
+    # 21. LLM 流式 SSE 解析（离线桩：mock 掉网络，验证 delta 拼接）
+    def t_llm_stream():
+        import json as _json
+        from unittest import mock
+
+        from core import http as http_mod
+        from core import llm as llm_mod
+
+        chunks = [
+            {"choices": [{"delta": {"content": "你好"}}]},
+            {"choices": [{"delta": {"content": "，我是流萤。"}}]},
+            {"choices": [{"delta": {"content": ""}}]},
+        ]
+        lines = ["data: " + _json.dumps(c, ensure_ascii=False) for c in chunks] + ["data: [DONE]"]
+
+        class FakeResp:
+            status_code = 200
+            text = ""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def iter_lines(self, decode_unicode=True):  # noqa: ARG002
+                return iter(lines)
+
+        brain = llm_mod.LLM({"api_key": "test", "base_url": "https://x.test", "model": "m"},
+                            system_prompt="")
+        with mock.patch.object(http_mod.session(), "post", return_value=FakeResp()):
+            out = "".join(brain.chat_stream([{"role": "user", "content": "hi"}]))
+        return out == "你好，我是流萤。", f"流式拼接={out!r}"
+
+    # 22. 情绪模型：词典推断 + 演化 + 边界钳制（离线，不调大模型）
     def t_emotion_model():
         import copy as _copy
 
@@ -347,7 +393,7 @@ def run_selftest(cfg: dict) -> int:
         return (sad and warm and rng and lab_ok,
                 f"低落演化={sad} 回暖+亲密={warm} 范围合法={rng} 标签={lab}/{comp}")
 
-    # 21. 情绪持久化（重启后仍在）
+    # 23. 情绪持久化（重启后仍在）
     def t_emotion_persist():
         import copy as _copy
 
@@ -367,7 +413,7 @@ def run_selftest(cfg: dict) -> int:
             b.close()
         return same and hist >= 1, f"重启后轮次={turns} 情绪保持={same} 历史条数={hist}"
 
-    # 22. MiMo 官方风格指令：导演模式三段齐 + brief 更短
+    # 24. MiMo 官方风格指令：导演模式三段齐 + brief 更短
     def t_emotion_style():
         import copy as _copy
 
@@ -392,7 +438,7 @@ def run_selftest(cfg: dict) -> int:
         ok = three and "用户说自己很累" in director and len(brief) < len(director)
         return ok, f"导演三段齐全={three}｜brief 更短={len(brief) < len(director)}｜director {len(director)} 字"
 
-    # 23. TTS messages 符合官方规范（指令在 user、正文在 assistant）
+    # 25. TTS messages 符合官方规范（指令在 user、正文在 assistant）
     def t_tts_messages():
         from core.tts import make_tts
 
@@ -404,7 +450,7 @@ def run_selftest(cfg: dict) -> int:
               and len(no_instr) == 1 and no_instr[0]["role"] == "assistant")
         return ok, f"有指令={[m['role'] for m in with_instr]}｜无指令={[m['role'] for m in no_instr]}"
 
-    # 24. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
+    # 26. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
     def t_memory_admin():
         from core.memory import Memory
 
@@ -432,7 +478,7 @@ def run_selftest(cfg: dict) -> int:
         return ok, (f"分类={sorted(cats)} 总数={n_all} 重要度≥8={n_hi} 待办={n_cat} "
                     f"含北京={n_kw} 分页={len(page1)}+{len(page2)} 删后={n_after}")
 
-    # 25. 打包（冻结模式）下项目根指向 exe 同级目录
+    # 27. 打包（冻结模式）下项目根指向 exe 同级目录
     def t_frozen_root():
         from core import config as cfgmod
 
@@ -441,7 +487,7 @@ def run_selftest(cfg: dict) -> int:
         saved_frozen = getattr(sys, "frozen", None)
         try:
             sys.frozen = True
-            sys.executable = str(tmp_dir / "流萤控制台.exe")
+            sys.executable = str(tmp_dir / "流萤.exe")
             frozen_root = cfgmod.resolve_root()
             frozen_flag = cfgmod.is_frozen()
         finally:
@@ -480,6 +526,8 @@ def run_selftest(cfg: dict) -> int:
         ("pi_agent 参数校验", t_pi_args),
         ("删除文件真正可用（回归修复）", t_delete_file),
         ("对外接口单行JSON协议", t_api_protocol),
+        ("流式分句器（切句+过滤ACTION）", t_sentence_buffer),
+        ("LLM流式SSE解析（离线桩）", t_llm_stream),
         ("情绪模型演化与边界", t_emotion_model),
         ("情绪持久化（重启可读）", t_emotion_persist),
         ("MiMo风格指令（导演模式）", t_emotion_style),
@@ -498,5 +546,10 @@ def run_selftest(cfg: dict) -> int:
         print(f"{flag}  {name}  ｜ {detail}")
     print(f"\n共 {len(results)} 项，通过 {len(results)-failed} 项，失败 {failed} 项。")
     print("（自检数据写在临时目录，不会污染真实记忆库）")
-    _tmp.cleanup()
+    # Windows 下打包（onefile）时，api 协议子进程的 sqlite 句柄可能延迟释放，
+    # 清理临时目录偶发 PermissionError——这不应影响自检结果，忽略即可（系统会兜底清理）。
+    try:
+        _tmp.cleanup()
+    except OSError:
+        pass
     return 1 if failed else 0

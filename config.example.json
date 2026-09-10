@@ -55,7 +55,7 @@
     "silence_threshold": 0.008,
     "max_record_seconds": 20,
     "min_record_seconds": 0.4,
-    "tail_silence_seconds": 1.0,
+    "tail_silence_seconds": 0.5,
     "output_tail_silence": 0.8,
     "barge_in": true,
     "barge_in_threshold": 0.02,

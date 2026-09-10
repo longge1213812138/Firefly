@@ -267,8 +267,9 @@ def start_pet_thread(cfg: dict | None = None, demo: bool | None = None) -> "queu
     def _run() -> None:
         try:
             run_pet({"pet": pet_cfg}, q, demo=use_demo)
-        except Exception:  # noqa: BLE001 - 桌宠失败不应拖垮主流程
-            pass
+        except Exception as exc:  # noqa: BLE001 - 桌宠失败不应拖垮主流程
+            import sys
+            print(f"（桌宠线程异常：{exc}）", file=sys.stderr, flush=True)
 
     threading.Thread(target=_run, daemon=True, name="fairy-pet").start()
     return q

@@ -74,12 +74,12 @@ def autostart_enabled() -> bool:
 def set_autostart(enable: bool) -> str:
     """开机自启：往「启动」文件夹放/删一个 bat（GBK+CRLF，双击系统可识别）。
 
-    打包成 exe 后没有「启动助手.bat」，改为直接拉起「流萤助手.exe」。
+    打包成 exe 后没有「启动助手.bat」，改为直接拉起「流萤.exe --text」。
     """
     p = autostart_path()
     if enable:
         if is_frozen():
-            launch = f'start "" "{APP_ROOT / "流萤助手.exe"}"\r\n'
+            launch = f'start "" "{APP_ROOT / "流萤.exe"}" --text\r\n'
         else:
             launch = 'start "" "启动助手.bat"\r\n'
         content = "@echo off\r\n" + f'cd /d "{APP_ROOT}"\r\n' + launch
@@ -159,6 +159,10 @@ class ChatWorker(threading.Thread):
                         self.ui.put(("status", "思考中…"))
                         reply = f.respond(text)
                     self.ui.put(("chat_fairy", f"{reply}"))
+                    # 语音播报（与 main.py 的 run_text / run_voice 对齐）
+                    if speak and reply:
+                        self.ui.put(("status", "播报中…"))
+                        f.say(reply)
                     self.ui.put(("status", f"就绪｜本轮 {time.time()-t0:.1f}s"))
                 elif kind == "voice_input":
                     (_, speak) = job
@@ -179,6 +183,10 @@ class ChatWorker(threading.Thread):
                     t0 = time.time()
                     reply = f.respond(text)
                     self.ui.put(("chat_fairy", reply))
+                    # 语音播报（与 main.py 的 run_text / run_voice 对齐）
+                    if speak and reply:
+                        self.ui.put(("status", "播报中…"))
+                        f.say(reply)
                     self.ui.put(("status", f"就绪｜本轮 {time.time()-t0:.1f}s"))
             except Exception as exc:  # noqa: BLE001
                 self.ui.put(("chat_sys", f"出错了：{exc}"))
@@ -1156,20 +1164,14 @@ class ConsoleApp:
         self.btn_selftest.configure(state="disabled")
         self.tool_box.configure(state="normal")
         self.tool_box.delete("1.0", "end")
-        self.tool_box.insert("end", f"运行中：main.py {flag} …\n\n")
+        self.tool_box.insert("end", f"运行中：流萤 {flag} …\n\n")
         self.tool_box.configure(state="disabled")
 
         def work():
             env = dict(os.environ, PYTHONIOENCODING="utf-8")
             if is_frozen():
-                # 打包后没有 python 和 main.py，改为调用同目录的「流萤助手.exe」
-                helper = APP_ROOT / "流萤助手.exe"
-                if not helper.exists():
-                    self.ui.put(("log_line", f"找不到 {helper}，无法运行该项检查。"))
-                    self.ui.put(("log_line", "请把「流萤助手.exe」和本程序放在同一个目录。"))
-                    self.ui.put(("tool_done", 1))
-                    return
-                cmd = [str(helper), flag]
+                # 打包后没有 python 和 main.py，直接调用自己：sys.executable 就是 流萤.exe
+                cmd = [sys.executable, flag]
             else:
                 cmd = [sys.executable, "main.py", flag]
             proc = subprocess.Popen(
@@ -1314,11 +1316,17 @@ def main() -> int:
         app = ConsoleApp()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-        try:
-            input("\n出错了，按回车关闭……")
-        except Exception:  # noqa: BLE001
-            pass
+        # 黑窗口被隐藏时不能 input（会不可见地卡死），只在控制台可见时才暂停
+        from core.winconsole import console_visible
+
+        if console_visible():
+            try:
+                input("\n出错了，按回车关闭……")
+            except Exception:  # noqa: BLE001
+                pass
         return 1
+    # 启动时即创建系统托盘（这样最小化到托盘功能立刻可用）
+    app._start_tray()
     # 必须进入事件循环，否则窗口会一闪而过（关窗/托盘退出时 destroy() 会让它返回）
     try:
         app.root.mainloop()

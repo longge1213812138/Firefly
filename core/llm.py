@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 
-import requests
+from . import http as http_mod
 
 ACTION_RE = re.compile(r"^\s*ACTION:\s*(\{.*\})\s*$", re.MULTILINE)
 
@@ -36,7 +36,7 @@ class LLM:
                 headers["api-key"] = self.api_key
             else:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-        r = requests.post(
+        r = http_mod.session().post(
             f"{self.base_url}/chat/completions", headers=headers,
             data=json.dumps(payload), timeout=self.timeout,
         )
@@ -50,6 +50,49 @@ class LLM:
             raise RuntimeError(f"大脑接口调用失败——{hint}｜原始返回：{r.text[:200]}")
         data = r.json()
         return (data["choices"][0]["message"]["content"] or "").strip()
+
+    def chat_stream(self, messages: list[dict], timeout: tuple[int, int] = (5, 60)):
+        """流式对话：逐段 yield delta 文本（SSE 的 `data:` 行）。
+
+        连接超时与读取超时分离：connect=5 秒（慢了直接判故障），
+        read=60 秒（每个 chunk 间隔内允许空闲，不把整段流当成一次读超时）。
+        生成器在首次迭代时才真正发请求；调用方用 for 消费。
+        """
+        if not self.api_key and "xiaomimimo" not in self.base_url:
+            raise RuntimeError("未配置 LLM API Key：请在 config.json 填写（llm.api_key 或 mimo.api_key）。")
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": self.system_prompt}] + messages,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            use_api_key = (self.auth == "api-key") or (self.auth == "auto" and "xiaomimimo" in self.base_url)
+            if use_api_key:
+                headers["api-key"] = self.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+        with http_mod.session().post(
+            f"{self.base_url}/chat/completions", headers=headers,
+            data=json.dumps(payload), stream=True, timeout=timeout,
+        ) as r:
+            if r.status_code != 200:
+                hint = f"HTTP {r.status_code}"
+                raise RuntimeError(f"大脑接口调用失败——{hint}｜原始返回：{r.text[:200]}")
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    delta = chunk["choices"][0]["delta"].get("content") or ""
+                except Exception:  # noqa: BLE001
+                    continue
+                if delta:
+                    yield delta
 
 
 def make_llm(cfg: dict, system_prompt: str = "") -> "LLM":

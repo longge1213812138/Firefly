@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import argparse
+import queue
 import re
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -31,9 +33,93 @@ from core.asr import make_asr  # noqa: E402
 from core.config import load_config, load_persona  # noqa: E402
 from core.emotion import EmotionModel  # noqa: E402
 from core.memory import Memory  # noqa: E402
+from core.sentence_buffer import SentenceBuffer  # noqa: E402
 from core.stats import UsageStats  # noqa: E402
 from core.tts import MiMoTTS, make_tts  # noqa: E402
 from core.wake import WakeListener  # noqa: E402
+
+
+class _StreamSpeaker:
+    """流式播报器：后台线程「按句合成 + 播放」，带 1 句前瞻以规避 ACTION 行。
+
+    前瞻逻辑：收到第 N+1 句才播第 N 句；流结束时只有确认「无 ACTION」才播最后一句。
+    这样「好的，我帮你查一下。」这类开场白在带动作的场景下不会先被念出来。
+    检测到用户插话（barge-in）会立刻停止并丢弃剩余句子。
+    """
+
+    def __init__(self, fairy: "Fairy"):
+        self.fairy = fairy
+        self.buf = SentenceBuffer()
+        self.q: "queue.Queue[tuple]" = queue.Queue()
+        self.interrupted = threading.Event()
+        self._cancelled = False
+        self.thread = threading.Thread(target=self._run, daemon=True, name="fairy-speaker")
+        self.thread.start()
+
+    def feed_delta(self, delta: str) -> None:
+        for sent in self.buf.feed(delta):
+            self.q.put(("sent", sent))
+
+    def finish(self, has_action: bool) -> None:
+        for sent in self.buf.flush():
+            self.q.put(("sent", sent))
+        self.q.put(("done", has_action))
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.q.put(("cancel", None))
+
+    def join(self, timeout: float = 180.0) -> None:
+        self.thread.join(timeout=timeout)
+
+    def _speak_one(self, text: str) -> bool:
+        """合成并播一句；返回 True 表示被用户插话打断。"""
+        f = self.fairy
+        try:
+            f._set_state("speaking")
+            instr = f._tts_instruction()
+            ref = f.cfg.get("tts", {}).get("reference_audio_path", "")
+            wav = f.tts.synth(text, instr, ref)
+            a = f.cfg["audio"]
+            tail = float(a.get("output_tail_silence", 0.8))
+            if a.get("barge_in", True):
+                return audio_io.play_wav_bytes_interruptible(
+                    wav,
+                    input_device=a.get("input_device"),
+                    output_device=a.get("output_device"),
+                    tail_silence=tail,
+                    mic_threshold=float(a.get("barge_in_threshold", 0.02)),
+                )
+            audio_io.play_wav_bytes(wav, device=a.get("output_device"), tail_silence=tail)
+            return False
+        except Exception as exc:  # noqa: BLE001
+            print(f"  （语音播报失败：{exc}）", flush=True)
+            return False
+
+    def _run(self) -> None:
+        prev: str | None = None
+        has_action = False
+        while True:
+            try:
+                item = self.q.get(timeout=60)
+            except queue.Empty:
+                item = ("done", False)
+            kind, val = item
+            if kind == "cancel":
+                return
+            if kind == "done":
+                has_action = bool(val)
+                break
+            # kind == "sent"：先把上一句播出去，再记住当前句
+            if prev is not None:
+                if self._speak_one(prev):
+                    self.interrupted.set()
+                    return
+            prev = val
+        # 收尾：没有 ACTION 才播最后一句
+        if prev is not None and not has_action and not self._cancelled:
+            if self._speak_one(prev):
+                self.interrupted.set()
 
 
 class Fairy:
@@ -93,71 +179,126 @@ class Fairy:
                       "（自然地运用这些记忆，不要生硬地复述，也不要说你查了数据库）"]
         return "\n".join(parts)
 
+    def _prepare_messages(self, user_text: str) -> list[dict]:
+        """对话前的公共准备：记用户话、载人设、召回往事、拼上下文，返回 messages。"""
+        self.memory.add(self.session_id, "user", user_text)
+        self.stats.record_message("user")
+        # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
+        self.persona = load_persona(self.cfg)
+        recall = self.memory.build_recall_block(
+            user_text, top_k=int(self.cfg["memory"].get("recall_top_k", 5))
+        )
+        self.llm.system_prompt = self._system_prompt(recall)
+        history = self.memory.recent(
+            self.session_id, limit=int(self.cfg["llm"].get("max_history_turns", 20))
+        )
+        return [{"role": h["role"], "content": h["content"]} for h in history]
+
+    def _finalize_action_text(self, messages: list[dict], text: str, acts: list[dict],
+                              auto_confirm: bool) -> str:
+        """执行动作（含确认）并返回最终应说出的文本；可能触发第二次 LLM 调用。"""
+        require_any = any(safety.needs_confirm(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
+        hard_any = any(safety.is_hard(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
+        allowed = True
+        if require_any:
+            prompt = safety.format_confirm_list(acts)
+            if hard_any:
+                allowed = bool(self.confirm_fn and self.confirm_fn(prompt))
+            else:
+                allowed = True if auto_confirm else bool(self.confirm_fn and self.confirm_fn(prompt))
+        if not allowed:
+            for a in acts:
+                safety.audit(self.cfg, {"session_id": self.session_id,
+                                        "action": a.get("name", ""), "args": a.get("args") or {},
+                                        "result": "用户拒绝", "risk": "high"})
+            note = f"（用户在确认清单上取消了全部 {len(acts)} 个操作）"
+        else:
+            results = []
+            for a in acts:  # 已在清单上确认过 → 逐个执行
+                ok, out = actions.execute(self.cfg, a, auto_confirm=True,
+                                          session_id=self.session_id,
+                                          confirm_fn=self.confirm_fn)
+                results.append(f"{a.get('name')} {'成功' if ok else '失败'}：{str(out)[:150]}")
+            note = f"（操作结果：{'；'.join(results)[:400]}）"
+        messages.append({"role": "assistant", "content": text})
+        messages.append({"role": "user", "content": f"系统提示：{note} 请用自然语言简短告诉用户结果。"})
+        try:
+            return self.llm.chat(messages).strip()
+        except Exception:
+            return (text + " " + note).strip()
+
+    def _record_turn(self, user_text: str, text: str, acts: list[dict] | None = None) -> None:
+        """一轮结束后的收尾：记回复、记动作、后台异步演化情绪。"""
+        self.memory.add(self.session_id, "assistant", text)
+        self.stats.record_message("assistant")
+        for a in (acts or []):
+            self.stats.record_action(a.get("name", "unknown"))
+        # 情绪在后台线程演化（不阻塞主回复与播报，每轮省一次完整 LLM 往返）
+        if self.emotion is not None and self.emotion.enabled:
+            try:
+                self._last_scene = f"用户刚说：『{user_text[:40]}』，此刻正要回应他。"
+                self.emotion.update_from_turn_async(user_text, text)
+            except Exception:  # noqa: BLE001
+                pass
+
     def respond(self, user_text: str, auto_confirm: bool = False) -> str:
+        """非流式一轮对话（文本 / GUI 路径）：同步返回最终回复文本。"""
         self._set_state("thinking")
         try:
-            self.memory.add(self.session_id, "user", user_text)
-            self.stats.record_message("user")
-            # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
-            self.persona = load_persona(self.cfg)
-            recall = self.memory.build_recall_block(
-                user_text, top_k=int(self.cfg["memory"].get("recall_top_k", 5))
-            )
-            self.llm.system_prompt = self._system_prompt(recall)
-
-            history = self.memory.recent(
-                self.session_id, limit=int(self.cfg["llm"].get("max_history_turns", 20))
-            )
-            messages = [{"role": h["role"], "content": h["content"]} for h in history]
-
+            messages = self._prepare_messages(user_text)
             reply = self.llm.chat(messages)
             text, acts = llm_mod.extract_actions(reply)
-
             if acts:
-                # 撤销清单（F-06 AC3）：把全部待执行操作列出，一次性确认
-                require_any = any(safety.needs_confirm(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
-                hard_any = any(safety.is_hard(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
-                allowed = True
-                if require_any:
-                    prompt = safety.format_confirm_list(acts)
-                    if hard_any:
-                        allowed = bool(self.confirm_fn and self.confirm_fn(prompt))
-                    else:
-                        allowed = True if auto_confirm else bool(self.confirm_fn and self.confirm_fn(prompt))
-                if not allowed:
-                    for a in acts:
-                        safety.audit(self.cfg, {"session_id": self.session_id,
-                                                "action": a.get("name", ""), "args": a.get("args") or {},
-                                                "result": "用户拒绝", "risk": "high"})
-                    note = f"（用户在确认清单上取消了全部 {len(acts)} 个操作）"
-                else:
-                    results = []
-                    for a in acts:  # 已在清单上确认过 → 逐个执行
-                        ok, out = actions.execute(self.cfg, a, auto_confirm=True,
-                                                  session_id=self.session_id,
-                                                  confirm_fn=self.confirm_fn)
-                        results.append(f"{a.get('name')} {'成功' if ok else '失败'}：{str(out)[:150]}")
-                    note = f"（操作结果：{'；'.join(results)[:400]}）"
-                messages.append({"role": "assistant", "content": text})
-                messages.append({"role": "user", "content": f"系统提示：{note} 请用自然语言简短告诉用户结果。"})
-                try:
-                    text = self.llm.chat(messages).strip()
-                except Exception:
-                    text = (text + " " + note).strip()
-
-            self.memory.add(self.session_id, "assistant", text)
-            self.stats.record_message("assistant")
-            if acts:
-                for a in acts:
-                    self.stats.record_action(a.get("name", "unknown"))
-            # 一轮结束后演化情绪（程序化：MiMo 推断 + 平滑 + 衰减 + 持久化）
-            if self.emotion is not None and self.emotion.enabled:
-                try:
-                    self._last_scene = f"用户刚说：『{user_text[:40]}』，此刻正要回应他。"
-                    self.emotion.update_from_turn(user_text, text)
-                except Exception:  # noqa: BLE001
-                    pass
+                text = self._finalize_action_text(messages, text, acts, auto_confirm)
+            self._record_turn(user_text, text, acts)
             return text
+        finally:
+            self._set_state("idle")
+
+    def respond_stream(self, user_text: str, auto_confirm: bool = False) -> tuple[str, bool]:
+        """语音路径：流式 LLM + 按句合成、抢先播报。返回 (最终文本, 是否被插话打断)。
+
+        与 respond 的区别：LLM 用 stream=True 边生成边切句，后台线程按句合成并播放，
+        使「第 N 句在播、第 N+1 句在合成」，首句到耳朵的延迟大幅下降。
+        流式失败时自动回退到非流式整段播报。
+        """
+        self._set_state("thinking")
+        try:
+            if not self.speak:
+                return self.respond(user_text, auto_confirm), False
+
+            messages = self._prepare_messages(user_text)
+            self._last_scene = f"用户刚说：『{user_text[:40]}』，此刻正要回应他。"
+            speaker = _StreamSpeaker(self)
+            full_reply: list[str] = []
+            try:
+                for delta in self.llm.chat_stream(messages):
+                    full_reply.append(delta)
+                    speaker.feed_delta(delta)
+            except Exception:  # noqa: BLE001 —— 流式失败，回退非流式
+                speaker.cancel()
+                reply = self.llm.chat(messages)
+                text, acts = llm_mod.extract_actions(reply)
+                if acts:
+                    text = self._finalize_action_text(messages, text, acts, auto_confirm)
+                self._record_turn(user_text, text, acts)
+                return text, self.say(text)
+
+            text, acts = llm_mod.extract_actions("".join(full_reply))
+            if acts:
+                # 带动作：不播流式积压句，改走「动作执行 + 整段播报结果」
+                speaker.finish(has_action=True)
+                text = self._finalize_action_text(messages, text, acts, auto_confirm)
+                self._record_turn(user_text, text, acts)
+                return text, self.say(text)
+
+            # 无动作：正常收尾，播最后积压句（已在后台合成/播放前面的句子）
+            speaker.finish(has_action=False)
+            if self.echo:
+                print(f"\n🧚 Fairy：{text.strip()}\n", flush=True)
+            speaker.join()
+            self._record_turn(user_text, text, acts)
+            return text, speaker.interrupted.is_set()
         finally:
             self._set_state("idle")
 
@@ -253,7 +394,7 @@ class Fairy:
             silence_threshold=float(a.get("silence_threshold", 0.012)),
             max_seconds=float(a.get("max_record_seconds", 20)),
             min_seconds=float(a.get("min_record_seconds", 0.4)),
-            tail_silence_seconds=float(a.get("tail_silence_seconds", 1.0)),
+            tail_silence_seconds=float(a.get("tail_silence_seconds", 0.5)),
             device=a.get("input_device"),
         )
         if data.size < 1600:  # 小于 0.1 秒视为无效
@@ -307,11 +448,15 @@ class Fairy:
         # 桌宠（config.json 的 pet.enabled 可关闭；失败不影响语音对话）
         if self.cfg.get("pet", {}).get("enabled", True):
             try:
+                import tkinter  # noqa: F401 — 先检测 tkinter 是否可用
                 from core.pet import start_pet_thread
 
                 pet_q = start_pet_thread(self.cfg)
                 self.on_state = lambda s: pet_q.put(s)
                 print("🧚 桌宠已上线：可拖拽、拖到屏幕边缘贴边隐藏；右键有菜单，双击可预览四种状态", flush=True)
+            except ImportError as exc:  # noqa: BLE001
+                print(f"（桌宠未能启动：缺少 tkinter —— 你的 Python 可能是精简版，没有自带 GUI 库。"
+                      f"不影响语音对话。）", flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"（桌宠未能启动，不影响语音对话：{exc}）", flush=True)
 
@@ -369,11 +514,11 @@ class Fairy:
                 # 对话 + 播报，支持被打断后立刻接着说（最多连续 3 轮）
                 for _ in range(3):
                     try:
-                        reply = self.respond(user_text)
+                        reply, interrupted = self.respond_stream(user_text)
                     except Exception as exc:  # noqa: BLE001
                         print(f"  （对话失败：{exc}）", flush=True)
                         break
-                    if not self.say(reply):
+                    if not interrupted:
                         break
                     # 被用户插话打断 → 立即接着听他说
                     print("  🎤 你打断了 Fairy，请继续说……", flush=True)
@@ -444,13 +589,8 @@ def is_wake_phrase(text: str) -> bool:
 
 def diag(cfg: dict) -> None:
     """云端服务体检：分别测 ASR / TTS / LLM，给出人话结论。"""
-    import base64
-    import json
-
     import numpy as np
-    import requests
 
-    mimo, llm = cfg["mimo"], cfg["llm"]
     wav = audio_io.to_wav_bytes(np.zeros(3200, dtype=np.int16), 16000)
 
     print("\n=== 云端服务体检 ===")
@@ -541,7 +681,7 @@ def emotion_check(cfg: dict) -> None:
     emo.close()
 
 
-def main() -> int:
+def run_app(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Fairy 本地语音助手")
     ap.add_argument("--text", action="store_true", help="键盘输入模式")
     ap.add_argument("--devices", action="store_true", help="列出音频设备")
@@ -554,7 +694,7 @@ def main() -> int:
     ap.add_argument("--stats", action="store_true", help="查看使用统计")
     ap.add_argument("--pi-check", action="store_true", help="外部 agent（Pi）体检")
     ap.add_argument("--emotion", action="store_true", help="查看当前情绪状态与 TTS 风格指令")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     cfg = load_config()
 
@@ -631,7 +771,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(run_app())
     except Exception:  # noqa: BLE001
         print("\n❌ 程序异常退出，以下是错误详情（可截图发我）：", flush=True)
         traceback.print_exc()

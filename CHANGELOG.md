@@ -8,6 +8,20 @@
 
 ## 版本记录
 
+### v0.5.0（三入口合一 + 语音回复提速）
+
+- ✅ **三入口整合成单 exe**：新增唯一入口 `fairy.py`，按参数分发四条分支——双击/无参数=图形控制台、`--pet`=桌宠、`--text`/`--selftest`/`--diag`/`--emotion`/`--stats` 等=对话与体检、`api <子命令>`=对外 JSON 接口。`build_exe.py` 由三 target 收敛为单 target，产物只剩一个 `流萤.exe`（体积从约 99 MB 降到约 35 MB）
+- ✅ **黑窗口隐藏**：新增 `core/winconsole.py`，用 `GetConsoleProcessList` 判定「控制台是否自己独占」（避免把用户自己的 cmd 一起藏掉），独占才 `SW_HIDE`；`--text` 等需要控制台的模式自然保留
+- ✅ **对外接口契约不变**：`流萤.exe api ping` 仍输出单行 JSON、退出码 0/1/2，可被外部程序用管道调用（自检项改为 `[sys.executable, "api", ...]`）
+- ✅ **语音回复大幅提速（中度优化）**：
+  - `core/http.py` 新增 `requests.Session` 单例 + 连接池，ASR / TTS / LLM 三处复用连接，省掉每轮三次 TLS 握手（约 100~300ms/次）
+  - `core/llm.py` 新增 `chat_stream()`：`stream=True` 的 SSE 解析（connect/read 超时分离），流式失败自动回退非流式
+  - `core/sentence_buffer.py` 分句器：按标点切句，**过滤 ACTION 行**（绝不念出 JSON）
+  - `main.py` 新增 `_StreamSpeaker` 流式播报器：后台线程「按句合成 + 播放」带 1 句前瞻（等下一句到来才播当前句，规避带动作时的开场白先被念出），支持 barge-in 打断；`run_voice` 改走 `respond_stream()`
+  - `tail_silence_seconds` 默认 1.0 → 0.5（说完停顿判结束更快，可再调）
+- ✅ **情绪模型后台异步化**：`core/emotion.py` 连接改 `check_same_thread=False` + 加锁，新增 `update_from_turn_async()`；`respond()` 不再每轮同步等一次 LLM 往返，情绪在后台线程演化、下一轮生效
+- 🧪 自检 **25 项 → 27 项**（新增：流式分句器切句+过滤 ACTION、LLM 流式 SSE 解析离线桩），27/27 全绿
+
 ### v0.4.0（记忆页 / 设置页完善 + 打包成可独立运行的 exe）
 
 - ✅ **记忆页重做**（控制台）：Treeview 表格（时间 / 角色 / 分类 / 重要度 / 内容）、关键词搜索、按分类与最低重要度筛选、分页（每页 20/50/100/200）、选中条目完整内容面板、提高 / 降低重要度、加标签、删除（二次确认，连带清理 FTS 索引）、一键清理过期、导出 JSON / CSV（带 BOM，Excel 可直接打开）

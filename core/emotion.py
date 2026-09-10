@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -121,6 +122,7 @@ class EmotionModel:
                           or "data/memory.db")
         self.state = EmotionState(**self.baseline)
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()  # 保护跨线程写库（后台异步推断 + 主线程读取）
         if self.enabled:
             self._init_schema()
             self.load()
@@ -129,7 +131,8 @@ class EmotionModel:
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self.db_path)
+            # check_same_thread=False：允许后台线程复用主线程创建的连接
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             try:
                 self._conn.execute("PRAGMA journal_mode=WAL")
@@ -180,29 +183,31 @@ class EmotionModel:
         if not self.enabled:
             return
         s = self.state
-        cur = self._db().cursor()
-        cur.execute(
-            "INSERT INTO emotion_state(id, valence, arousal, intimacy, label, compound,"
-            " turns, updated_at, reason) VALUES (1,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET valence=excluded.valence, arousal=excluded.arousal,"
-            " intimacy=excluded.intimacy, label=excluded.label, compound=excluded.compound,"
-            " turns=excluded.turns, updated_at=excluded.updated_at, reason=excluded.reason",
-            (s.valence, s.arousal, s.intimacy, s.label, s.compound,
-             s.turns, s.updated_at, s.reason),
-        )
-        self._db().commit()
+        with self._lock:
+            cur = self._db().cursor()
+            cur.execute(
+                "INSERT INTO emotion_state(id, valence, arousal, intimacy, label, compound,"
+                " turns, updated_at, reason) VALUES (1,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET valence=excluded.valence, arousal=excluded.arousal,"
+                " intimacy=excluded.intimacy, label=excluded.label, compound=excluded.compound,"
+                " turns=excluded.turns, updated_at=excluded.updated_at, reason=excluded.reason",
+                (s.valence, s.arousal, s.intimacy, s.label, s.compound,
+                 s.turns, s.updated_at, s.reason),
+            )
+            self._db().commit()
 
     def _log(self, note: str = "") -> None:
         if not self.enabled:
             return
         s = self.state
-        cur = self._db().cursor()
-        cur.execute(
-            "INSERT INTO emotion_log(ts, valence, arousal, intimacy, label, compound, note)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (int(time.time()), s.valence, s.arousal, s.intimacy, s.label, s.compound, note[:200]),
-        )
-        self._db().commit()
+        with self._lock:
+            cur = self._db().cursor()
+            cur.execute(
+                "INSERT INTO emotion_log(ts, valence, arousal, intimacy, label, compound, note)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (int(time.time()), s.valence, s.arousal, s.intimacy, s.label, s.compound, note[:200]),
+            )
+            self._db().commit()
 
     def history(self, limit: int = 60) -> list[dict]:
         if not self.enabled:
@@ -215,12 +220,13 @@ class EmotionModel:
         return rows
 
     def close(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except sqlite3.Error:
-                pass
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except sqlite3.Error:
+                    pass
+                self._conn = None
 
     # ------------------------------------------------------------------ 演化
     def _decay_to_now(self) -> None:
@@ -331,6 +337,23 @@ class EmotionModel:
         self.save()
         self._log(note=f"用户：{(user_text or '')[:60]}")
         return s
+
+    def update_from_turn_async(self, user_text: str, reply_text: str = "") -> None:
+        """一轮结束后在后台线程更新情绪，不阻塞主回复与播报（每轮省一次完整 LLM 往返）。
+
+        推断失败/写库失败都被吞掉并记日志，绝不影响对话主流程。
+        """
+        if not self.enabled:
+            return
+
+        def _job() -> None:
+            try:
+                self.update_from_turn(user_text, reply_text)
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger("fairy").warning("情绪后台更新失败：%s", exc)
+
+        threading.Thread(target=_job, daemon=True, name="fairy-emotion").start()
 
     def reset(self, note: str = "手动重置到基准") -> EmotionState:
         s = self.state

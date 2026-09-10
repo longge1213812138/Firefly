@@ -11,7 +11,7 @@ import base64
 import json
 from pathlib import Path
 
-import requests
+from . import http as http_mod
 
 
 class MiMoTTS:
@@ -70,7 +70,7 @@ class MiMoTTS:
             except Exception as e:
                 raise RuntimeError(f"无法读取参考音频文件 {reference_audio_path}: {e}")
 
-        r = requests.post(
+        r = http_mod.session().post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
             data=json.dumps(payload),

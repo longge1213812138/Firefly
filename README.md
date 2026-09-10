@@ -14,7 +14,7 @@
 | 语音打断    | ✅ 可用     | Fairy 说话时你直接插话，它立刻闭嘴接着听你说（戴耳机效果最好）                                                            |
 | 电脑操作    | ✅ 可用（受限） | 查时间、列目录、读文件、开程序/网页 **直接执行**；写文件、跑命令等 **必须先确认**；删除/覆盖/外发是**硬闸口**，必须当面确认且无法跳过，批量操作先出「撤销清单」      |
 | 桌宠      | ✅ 可用     | 小萤火虫「流萤」常驻桌面：待机呼吸 / 聆听波纹 / 思考转星 / 说话口型四态动画；可拖拽、贴边隐藏、右键菜单；双击预览四种状态                             |
-| 控制台 GUI | ✅ 可用     | 双击 `控制台.bat`（打包后是 `流萤控制台.exe`）：六页标签——①对话（危险操作弹窗确认，支持 `/pi`）②**记忆**（分类/重要度筛选、翻页、调重要度、加标签、删除、导出 JSON·CSV，双击看全文）③**情感**（三维情绪状态、情绪曲线、发给 TTS 的风格指令预览与微调）④**配置**（API Key 掩码不回显、模型/音色、**情绪模型设置**、**Pi 协作设置**、唤醒词、录音阈值、人设编辑器、开机自启）⑤统计 ⑥状态（一键体检 / 离线自检 / 审计日志 / 数据位置）。关闭窗口自动最小化到系统托盘 |
+| 控制台 GUI | ✅ 可用     | 双击 `控制台.bat`（打包后双击 `流萤.exe` 即可）：六页标签——①对话（危险操作弹窗确认，支持 `/pi`）②**记忆**（分类/重要度筛选、翻页、调重要度、加标签、删除、导出 JSON·CSV，双击看全文）③**情感**（三维情绪状态、情绪曲线、发给 TTS 的风格指令预览与微调）④**配置**（API Key 掩码不回显、模型/音色、**情绪模型设置**、**Pi 协作设置**、唤醒词、录音阈值、人设编辑器、开机自启）⑤统计 ⑥状态（一键体检 / 离线自检 / 审计日志 / 数据位置）。关闭窗口自动最小化到系统托盘 |
 | 声线 / 性格 | ✅ 已预留    | 人设改 `persona/default.md` 或控制台里直接编辑（保存即生效）；音色改 `tts.voice`，后期换 voicedesign/voiceclone 型号即可克隆声线 |
 | 与 Pi 协作 | ✅ 可选 | 平时**完全独立运行、不依赖 Pi**；只有你**明确要求**时才调用本机 `pi` 命令行（对话里输入 `/pi 任务`，或点名"用 Pi 帮我…"），且**每次都会先确认**。长期记忆只存流萤这边，**不与 Pi 共享**；Pi 的长结果只把**摘要**记进记忆 |
 | 情绪模型 | ✅ 可用 | **程序化**情绪：愉悦度 / 唤醒度 / 亲密度三维数值状态，随对话演化、随时间自然平复、重启不丢。每轮由小米 MiMo 大模型推断情绪，再按 **MiMo-V2.5-TTS 官方的自然语言/导演模式**翻译成风格指令交给语音去演绎（支持"温柔但疲惫"这类复合情绪）。控制台「情感」页可视化、可手动微调 |
@@ -144,15 +144,17 @@ python main.py --emotion     # 查看当前情绪状态与发给 TTS 的风格�
 
 #### 对外接口（给外部程序调用）
 
-若你想让别的程序/Pi 扩展反过来调用流萤，用 `fairy_api.py`（stdout 单行 JSON）：
+若你想让别的程序/Pi 扩展反过来调用流萤，用统一入口 `fairy.py api`（stdout 单行 JSON；开发期也可直接 `python fairy_api.py`）：
 
 ```bash
-python fairy_api.py ping                      # 健康检查
-python fairy_api.py context --query 关键词     # 取"人设+相关往事"整块
-python fairy_api.py remember --role user --text "记住这句话"
-python fairy_api.py say --text "用流萤的声音念这句"
-python fairy_api.py search --query 豆豆        # 检索历史记忆
+python fairy.py api ping                      # 健康检查
+python fairy.py api context --query 关键词     # 取"人设+相关往事"整块
+python fairy.py api remember --role user --text "记住这句话"
+python fairy.py api say --text "用流萤的声音念这句"
+python fairy.py api search --query 豆豆        # 检索历史记忆
 ```
+
+打包成 exe 后，等价命令是 `流萤.exe api ping`（接口协议不变，仍输出单行 JSON、退出码 0/1/2）。
 
 设备不对时，在 `config.json` 的 `audio.input_device` / `output_device` 填 `--devices` 查到的编号（不填则使用系统默认设备）。
 
@@ -166,13 +168,20 @@ python fairy_api.py search --query 豆豆        # 检索历史记忆
 双击 打包exe.bat            # 或命令行：.venv\Scripts\python.exe build_exe.py
 ```
 
-产物在 `dist\`，一共三个 exe（都是**单文件**，双击即用）：
+产物在 `dist\`，**只有一个 exe**（单文件，双击即用），按启动方式分发：
 
-| exe              | 作用                                        |
-| ---------------- | ----------------------------------------- |
-| `流萤助手.exe`      | 语音 / 键盘对话主程序（保留控制台窗口，方便看输出）               |
-| `流萤控制台.exe`     | 图形控制台（无黑窗口）                               |
-| `流萤接口.exe`      | 给外部程序调用的单行 JSON 接口（`流萤接口.exe ping`）        |
+| 启动方式               | 作用                                                        |
+| -------------------- | ---------------------------------------------------------- |
+| 双击 `流萤.exe`        | 图形控制台：对话 / 记忆 / 情感 / 配置 / 统计 / 状态（黑窗口自动隐藏）      |
+| `流萤.exe --text`     | 语音 / 键盘对话主程序（保留控制台，可交互）                              |
+| `流萤.exe --pet`      | 只启动桌面宠物                                                 |
+| `流萤.exe --selftest` | 离线自检（不联网、不需要 Key）                                      |
+| `流萤.exe --diag`     | 云端服务体检（分别测 识别 / 合成 / 大脑）                              |
+| `流萤.exe api ping`   | 给外部程序调用的单行 JSON 接口                                     |
+
+> 为什么是一个 exe 而不是三个？控制台子系统与 GUI 子系统是编译期定死的属性，原先是三个入口各打一个 exe。
+> 现在统一成「控制台子系统 + 按需隐藏黑窗口」：图形模式启动时由 `core/winconsole.py` 判断「控制台是否自己独占」
+> 再隐藏，需要控制台的模式（`--text` 等）自然保留。代价是双击图形控制台/桌宠时会**闪现一下黑窗口**（约几百毫秒）。
 
 `dist\` 里同时会放好 `persona\`、`config.example.json`、`使用说明.txt`。**首次运行若没有 `config.json`，会自动按模板生成一份**，填好 Key 就能用。
 
@@ -249,20 +258,24 @@ python fairy_api.py search --query 豆豆        # 检索历史记忆
 
 ```
 fairy/
-├─ main.py              入口（对话编排 / 唤醒 / 主循环）
+├─ fairy.py             唯一入口（打包与开发共用：按参数分发 gui / main / api / pet）
+├─ main.py              语音/键盘对话主程序（对话编排 / 唤醒 / 主循环）
 ├─ gui.py               图形控制台（tkinter，六页）
 ├─ fairy_api.py         对外接口：给外部程序调用的单行 JSON CLI
-├─ build_exe.py         打包脚本（PyInstaller，产出 dist\ 里的三个 exe）
+├─ build_exe.py         打包脚本（PyInstaller，产出 dist\ 里的单个 流萤.exe）
 ├─ config.json          全部配置（Key、麦克风、安全策略、emotion 段、pi 段）
 ├─ config.example.json  配置模板（首次运行会自动复制成 config.json）
 ├─ requirements.txt     依赖清单
 ├─ persona/default.md   人设（性格、说话风格）
 ├─ core/
 │  ├─ memory.py         记忆：SQLite 持久化 + 中文检索 + 召回 + 管理（筛选/删除/导出）
-│  ├─ emotion.py        情绪：三维状态 + MiMo 推断 + 官方风格指令生成
+│  ├─ emotion.py        情绪：三维状态 + MiMo 推断（后台异步）+ 官方风格指令生成
 │  ├─ asr.py            语音识别：MiMo-V2.5-ASR
 │  ├─ tts.py            语音合成：MiMo-V2.5-TTS（支持 role=user 风格/情绪指令）
-│  ├─ llm.py            大脑：OpenAI 兼容接口 + 动作指令解析
+│  ├─ llm.py            大脑：OpenAI 兼容接口 + 流式输出 + 动作指令解析
+│  ├─ http.py           HTTP 连接复用（requests.Session 单例，ASR/TTS/LLM 共用）
+│  ├─ sentence_buffer.py 流式回复按句切分（过滤 ACTION 行，供抢先播报）
+│  ├─ winconsole.py     Windows 控制台隐藏（单 exe 化用：独占判定 + SW_HIDE）
 │  ├─ audio_io.py       录音（自动断句）/ 播放
 │  ├─ wake.py           唤醒：Porcupine + 空格键兜底
 │  ├─ pet.py            桌宠「小萤火虫流萤」四态动画
@@ -273,7 +286,7 @@ fairy/
 │  └─ safety.py         安全闸口 + 审计日志
 ├─ data/                记忆库与日志（运行时生成）
 ├─ dist/                打包产物（exe，不入库）
-├─ tests/smoke_test.py  离线自检用例（25 项）
+├─ tests/smoke_test.py  离线自检用例（27 项）
 ├─ 启动助手.bat         一键启动
 └─ 打包exe.bat          一键打包
 ```
@@ -291,7 +304,7 @@ fairy/
 7. ~~使用统计~~ ✅ 已完成（`python main.py --stats`，GUI 状态页展示）
 8. ~~与 Pi 协作~~ ✅ 已完成（按需调用 `pi` CLI：`/pi 任务`，每次确认，记忆不共享）
 9. ~~记忆页与设置页完善~~ ✅ 已完成（记忆页筛选/翻页/编辑/导出；设置页新增情绪模型与 Pi 协作分组）
-10. ~~打包成可独立运行的 exe~~ ✅ 已完成（`打包exe.bat` → `dist\` 三个单文件 exe）
+10. ~~打包成可独立运行的 exe~~ ✅ 已完成（`打包exe.bat` → `dist\` 单个 流萤.exe，参数分发多模式）
 11. 对外接口硬化（协议版本号 / 注入体量可选），为将来做 Pi 扩展铺路
 12. 让桌宠形象随情绪联动（现在桌宠只有 4 个动作状态，可接入情绪做表情/颜色变化）
 13. 全权接管的安全放开（在硬闸口框架下逐步开放更多操作，如批量整理文件）
