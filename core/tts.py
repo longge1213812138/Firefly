@@ -26,23 +26,34 @@ class MiMoTTS:
     def _headers(self) -> dict:
         return {"api-key": self.api_key, "Content-Type": "application/json"}
 
+    def build_messages(self, text: str, voice_instruction: str | None = None) -> list[dict]:
+        """按 MiMo 官方规范组织 messages：自然语言指令 → role=user，要念的正文 → role=assistant。
+
+        单独抽出来便于离线测试（不需要真的发请求）。
+        """
+        messages: list[dict] = []
+        if voice_instruction and str(voice_instruction).strip():
+            messages.append({"role": "user", "content": str(voice_instruction).strip()})
+        messages.append({"role": "assistant", "content": text})
+        return messages
+
     def synth(self, text: str, voice_instruction: str = None, reference_audio_path: str = None) -> bytes:
         """返回音频字节（默认 wav）。
 
+        按 MiMo 官方规范组织 messages：自然语言指令放 role=user，要念的文本放 role=assistant。
+
         Args:
             text: 要合成的文本
-            voice_instruction: voicedesign模型的音色描述（可选）
-            reference_audio_path: voiceclone模型的参考音频路径（可选）
+            voice_instruction: 发在 role=user 的自然语言指令。
+                - voicedesign 模型：这是「音色设计描述」（必填）
+                - 预置音色 / voiceclone 模型：这是「发音风格指令」，用来控制语速、情绪
+                  （支持复合情绪，如"温柔但疲惫"），也可用导演模式的「角色/场景/指导」写法
+            reference_audio_path: voiceclone 模型的参考音频路径（可选）
         """
         if not self.api_key:
             raise RuntimeError("未配置 MiMo API Key：请先在 config.json 的 mimo.api_key 填入。")
 
-        messages = []
-        # 如果是voicedesign模型，需要user message作为音色描述
-        if voice_instruction and self.model == "mimo-v2.5-tts-voicedesign":
-            messages.append({"role": "user", "content": voice_instruction})
-        # 助手消息包含要合成的文本
-        messages.append({"role": "assistant", "content": text})
+        messages = self.build_messages(text, voice_instruction)
 
         payload = {
             "model": self.model,

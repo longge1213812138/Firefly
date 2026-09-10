@@ -86,6 +86,21 @@
     "start_y": null
   },
 
+  "emotion": {
+    "_说明": "程序化情绪模型（对齐小米 MiMo-V2.5-TTS 官方方案）。情绪是数值化的三维状态（愉悦度/唤醒度/亲密度），随对话演化、随时间平复；每轮由 MiMo 大模型推断（严格 JSON），失败时用关键词兜底。最终翻译成自然语言风格指令发给 TTS（按官方规范放 role=user）。",
+    "_字段": "enabled 开关；style_mode=director(导演模式：角色/场景/指导，表现力更强) 或 brief(一句话)；infer_with_llm 是否用大模型推断（关掉则纯关键词，更省钱但更粗）；decay_per_hour 每小时向基准平复的比例；baseline 基准情绪；max_intimacy_gain_per_turn 每轮亲密度增量上限。",
+    "enabled": true,
+    "style_mode": "director",
+    "infer_with_llm": true,
+    "decay_per_hour": 0.12,
+    "baseline": {
+      "valence": 0.25,
+      "arousal": 0.45,
+      "intimacy": 0.3
+    },
+    "max_intimacy_gain_per_turn": 0.01
+  },
+
   "pi": {
     "_说明": "可选：按需调用 Pi 编程智能体 CLI（pi.dev）。平时陪伴端完全独立运行、不依赖 Pi；只有当你在对话里明确要求（输入 /pi 任务，或点名「用 Pi 帮我」）时才会调用，且每次都会让你确认。长期记忆始终只存在陪伴端。",
     "_字段": "cli_path 留空=自动在 PATH 里找 pi；cwd 留空=项目根；read_only=true 时只给读类工具(read/grep/find/ls)；timeout 秒；mode=text(默认)|json|rpc；extra_args 追加给 pi 的额外参数。",

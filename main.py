@@ -8,6 +8,7 @@
   python main.py --selftest   离线自检（不联网）
   python main.py --pet        只启动桌宠
   python main.py --pi-check   外部 agent（Pi）体检
+  python main.py --emotion     查看当前情绪状态与发给 TTS 的风格指令
   python gui.py               图形控制台（对话/记忆/配置/状态）
 
 对话中想让 Pi 帮忙，输入 /pi <任务>（仅在用户明确要求时才调用，且每次都会当面确认）。
@@ -28,6 +29,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from core import actions, audio_io, llm as llm_mod, safety  # noqa: E402
 from core.asr import make_asr  # noqa: E402
 from core.config import load_config, load_persona  # noqa: E402
+from core.emotion import EmotionModel  # noqa: E402
 from core.memory import Memory  # noqa: E402
 from core.stats import UsageStats  # noqa: E402
 from core.tts import MiMoTTS, make_tts  # noqa: E402
@@ -45,6 +47,8 @@ class Fairy:
         self.on_state = None          # 状态回调：idle/listening/thinking/speaking（桌宠用）
         self.persona = load_persona(cfg)
         self.memory = Memory(cfg["memory"]["db_path"])
+        self.emotion = EmotionModel(cfg, db_path=cfg["memory"]["db_path"])
+        self._last_scene = ""          # 最近一轮的情境描述，给 TTS 导演模式用
         self.stats = UsageStats(cfg.get("stats", {}).get("path", "data/stats.json"))
         self.stats.record_session()
         self.llm = llm_mod.make_llm(cfg, system_prompt=self.persona)
@@ -62,6 +66,24 @@ class Fairy:
     def _say_line(self, text: str) -> None:
         if self.echo:
             print(text, flush=True)
+
+    def _tts_instruction(self) -> str:
+        """拼出 role=user 的自然语言指令（按 MiMo 官方规范，指令放 user、正文放 assistant）。
+
+        - voicedesign 模型：这段是「音色设计描述」
+        - 其它模型：这段是「发音风格指令」
+        这里把用户在配置里写的音色描述与**实时情绪**合并成一段。
+        """
+        base = str((self.cfg.get("tts", {}) or {}).get("voice_instruction", "") or "").strip()
+        if self.emotion is None or not self.emotion.enabled:
+            return base
+        try:
+            emo = self.emotion.style_instruction(scene=self._last_scene)
+        except Exception:  # noqa: BLE001
+            return base
+        if not base:
+            return emo
+        return f"{base}。\n此刻的语气与情绪（请务必照此演绎）：\n{emo}"
 
     # ---------- 核心对话 ----------
     def _system_prompt(self, recall: str) -> str:
@@ -128,6 +150,13 @@ class Fairy:
             if acts:
                 for a in acts:
                     self.stats.record_action(a.get("name", "unknown"))
+            # 一轮结束后演化情绪（程序化：MiMo 推断 + 平滑 + 衰减 + 持久化）
+            if self.emotion is not None and self.emotion.enabled:
+                try:
+                    self._last_scene = f"用户刚说：『{user_text[:40]}』，此刻正要回应他。"
+                    self.emotion.update_from_turn(user_text, text)
+                except Exception:  # noqa: BLE001
+                    pass
             return text
         finally:
             self._set_state("idle")
@@ -184,10 +213,34 @@ class Fairy:
             return note
 
         self.stats.record_action("pi_agent")
-        # 结果写进陪伴端自己的记忆（截断，免得超长 diff 撑爆记忆库）
-        summary = res.text if len(res.text) <= 2000 else res.text[:2000] + "…（已截断）"
-        self.memory.add(self.session_id, "assistant", f"（Pi 的任务结果）{summary}", category="笔记")
+        # 只把「摘要」写进陪伴端记忆（不整段存，免得超长 diff 撑爆记忆库）
+        summary = self._summarize_pi_result(task, res.text)
+        self.memory.add(self.session_id, "assistant",
+                        f"（Pi 任务：{task[:60]}）{summary}", category="笔记")
         return res.text
+
+    def _summarize_pi_result(self, task: str, body: str, limit: int = 240) -> str:
+        """把 Pi 的长结果压成短摘要再入库；摘要失败就退化为截断，绝不丢结论。"""
+        text = (body or "").strip()
+        if not text:
+            return "（无输出）"
+        if len(text) <= limit:
+            return text
+        try:
+            brain = llm_mod.make_llm(self.cfg, system_prompt="你是文本摘要助手，只输出摘要正文。")
+            brain.temperature = 0.3
+            prompt = (
+                f"请把下面这段「Pi（编程智能体）执行任务的结果」压缩成不超过 {limit} 字的中文摘要。\n"
+                "要求：保留关键结论、涉及的文件或路径、发现的问题与后续建议；"
+                "删掉代码块、日志噪音和过程描述。只输出摘要正文，不要开场白。\n\n"
+                f"任务：{task[:200]}\n\n结果：\n{text[:6000]}"
+            )
+            summary = (brain.chat([{"role": "user", "content": prompt}]) or "").strip()
+            if summary:
+                return summary[: limit * 2]
+        except Exception:  # noqa: BLE001
+            pass
+        return text[:limit] + "…（原文过长，已截断）"
 
     # ---------- 语音链路 ----------
     def listen(self) -> str:
@@ -227,8 +280,8 @@ class Fairy:
             if not self.speak:
                 return False
             try:
-                # 获取自定义音色参数
-                voice_instruction = self.cfg.get("tts", {}).get("voice_instruction", "")
+                # role=user 的自然语言指令：音色描述 + 实时情绪风格（MiMo 官方规范）
+                voice_instruction = self._tts_instruction()
                 reference_audio_path = self.cfg.get("tts", {}).get("reference_audio_path", "")
                 wav_bytes = self.tts.synth(text, voice_instruction, reference_audio_path)
                 a = self.cfg["audio"]
@@ -340,6 +393,8 @@ class Fairy:
         finally:
             waker.close()
             self.memory.close()
+            if self.emotion is not None:
+                self.emotion.close()
 
     def run_text(self) -> None:
         print("\n【键盘模式】直接打字回车即可对话；输入 q 退出。", flush=True)
@@ -369,6 +424,8 @@ class Fairy:
             if self.speak:
                 self.say(reply)
         self.memory.close()
+        if self.emotion is not None:
+            self.emotion.close()
 
 
 def _is_exit(text: str) -> bool:
@@ -464,6 +521,26 @@ def pi_check(cfg: dict) -> None:
     print("\n提示：只有用户明确输入 /pi <任务>（或点名要求）时才会调用 Pi；平时陪伴端完全独立运行。")
 
 
+def emotion_check(cfg: dict) -> None:
+    """情绪体检：显示当前情绪状态与将要发给 MiMo-TTS 的风格指令。"""
+    emo = EmotionModel(cfg, db_path=cfg["memory"]["db_path"])
+    s = emo.snapshot()
+    print("\n=== 情绪状态（程序化）===")
+    print(f"启用={s['enabled']}｜风格模式={s['style_mode']}｜累计轮次={s['turns']}")
+    print(f"愉悦度 {s['valence']:+.2f}   （-1 低落 ~ +1 开心）")
+    print(f"唤醒度 {s['arousal']:.2f}    （0 慵懒疲惫 ~ 1 激动亢奋）")
+    print(f"亲密度 {s['intimacy']:.2f}   （0 陌生 ~ 1 很熟）")
+    print(f"主情绪：{s['label']}｜复合情绪：{s['compound']}")
+    print(f"推断依据：{s['reason'] or '（暂无）'}")
+    print("\n--- 将发给 MiMo-TTS 的风格指令（role=user）---")
+    print(s["style_preview"])
+    print("\n--- 最近变化 ---")
+    for h in emo.history(8):
+        ts = time.strftime("%m-%d %H:%M", time.localtime(h["ts"]))
+        print(f"  [{ts}] {h['label']}  v={h['valence']:+.2f} a={h['arousal']:.2f} i={h['intimacy']:.2f}")
+    emo.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fairy 本地语音助手")
     ap.add_argument("--text", action="store_true", help="键盘输入模式")
@@ -476,6 +553,7 @@ def main() -> int:
     ap.add_argument("--pet", action="store_true", help="只启动桌宠（不进入语音对话）")
     ap.add_argument("--stats", action="store_true", help="查看使用统计")
     ap.add_argument("--pi-check", action="store_true", help="外部 agent（Pi）体检")
+    ap.add_argument("--emotion", action="store_true", help="查看当前情绪状态与 TTS 风格指令")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -533,6 +611,10 @@ def main() -> int:
 
     if args.pi_check:
         pi_check(cfg)
+        return 0
+
+    if args.emotion:
+        emotion_check(cfg)
         return 0
 
     if args.selftest:

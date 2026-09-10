@@ -27,6 +27,9 @@ def run_selftest(cfg: dict) -> int:
     cfg = copy.deepcopy(cfg)
     cfg["memory"]["db_path"] = str(tmp_dir / "selftest_memory.db")
     cfg["safety"]["audit_log"] = str(tmp_dir / "selftest_audit.log")
+    cfg["stats"] = {"path": str(tmp_dir / "selftest_stats.json")}
+    # 自检一律离线：情绪推断关掉大模型，只走关键词兜底
+    cfg["emotion"] = {"enabled": True, "infer_with_llm": False}
 
     results: list[tuple[str, bool, str]] = []
 
@@ -311,6 +314,87 @@ def run_selftest(cfg: dict) -> int:
             results.append(ok)
         return all(results), f"ping/persona/context 单行JSON合法={results}"
 
+    # 20. 情绪模型：词典推断 + 演化 + 边界钳制（离线，不调大模型）
+    def t_emotion_model():
+        import copy as _copy
+
+        from core.emotion import EmotionModel, describe
+
+        ecfg = _copy.deepcopy(cfg)
+        ecfg["emotion"] = {"enabled": True, "infer_with_llm": False,
+                           "baseline": {"valence": 0.2, "arousal": 0.4, "intimacy": 0.3}}
+        with tempfile.TemporaryDirectory() as td:
+            emo = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
+            v0 = emo.state.valence
+            emo.update_from_turn("今天好累啊，加班到现在", "辛苦啦，先歇会儿", use_llm=False)
+            sad = emo.state.valence < v0 and emo.state.arousal < 0.5
+            emo.update_from_turn("谢谢你陪我，今天很开心！", "那就好呀", use_llm=False)
+            warm = emo.state.valence > v0 and emo.state.intimacy > 0.3
+            rng = (-1.0 <= emo.state.valence <= 1.0 and 0.0 <= emo.state.arousal <= 1.0
+                   and 0.0 <= emo.state.intimacy <= 1.0)
+            lab, comp = describe(0.5, 0.2)
+            lab_ok = lab in ("温柔", "恬静") and bool(comp)
+            emo.close()
+        return (sad and warm and rng and lab_ok,
+                f"低落演化={sad} 回暖+亲密={warm} 范围合法={rng} 标签={lab}/{comp}")
+
+    # 21. 情绪持久化（重启后仍在）
+    def t_emotion_persist():
+        import copy as _copy
+
+        from core.emotion import EmotionModel
+
+        ecfg = _copy.deepcopy(cfg)
+        ecfg["emotion"] = {"enabled": True, "infer_with_llm": False}
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "e.db")
+            a = EmotionModel(ecfg, db_path=db)
+            a.update_from_turn("我今天超级开心！！！", "太好了", use_llm=False)
+            turns, val = a.state.turns, a.state.valence
+            a.close()
+            b = EmotionModel(ecfg, db_path=db)
+            same = b.state.turns == turns and abs(b.state.valence - val) < 0.08
+            hist = len(b.history(10))
+            b.close()
+        return same and hist >= 1, f"重启后轮次={turns} 情绪保持={same} 历史条数={hist}"
+
+    # 22. MiMo 官方风格指令：导演模式三段齐 + brief 更短
+    def t_emotion_style():
+        import copy as _copy
+
+        from core.emotion import EmotionModel
+
+        with tempfile.TemporaryDirectory() as td:
+            d = _copy.deepcopy(cfg)
+            d["emotion"] = {"enabled": True, "infer_with_llm": False, "style_mode": "director"}
+            e1 = EmotionModel(d, db_path=str(Path(td) / "a.db"))
+            e1.update_from_turn("好累好困，今天没力气", "", use_llm=False)
+            director = e1.style_instruction(scene="用户说自己很累")
+            e1.close()
+
+            b = _copy.deepcopy(cfg)
+            b["emotion"] = {"enabled": True, "infer_with_llm": False, "style_mode": "brief"}
+            e2 = EmotionModel(b, db_path=str(Path(td) / "b.db"))
+            e2.update_from_turn("好累好困，今天没力气", "", use_llm=False)
+            brief = e2.style_instruction()
+            e2.close()
+
+        three = all(k in director for k in ("【角色】", "【场景】", "【指导】"))
+        ok = three and "用户说自己很累" in director and len(brief) < len(director)
+        return ok, f"导演三段齐全={three}｜brief 更短={len(brief) < len(director)}｜director {len(director)} 字"
+
+    # 23. TTS messages 符合官方规范（指令在 user、正文在 assistant）
+    def t_tts_messages():
+        from core.tts import make_tts
+
+        tts = make_tts(cfg)
+        with_instr = tts.build_messages("你好呀", "用温柔的语气说，语速慢一点")
+        no_instr = tts.build_messages("你好呀", "")
+        ok = (with_instr[0]["role"] == "user" and "温柔" in with_instr[0]["content"]
+              and with_instr[-1]["role"] == "assistant" and with_instr[-1]["content"] == "你好呀"
+              and len(no_instr) == 1 and no_instr[0]["role"] == "assistant")
+        return ok, f"有指令={[m['role'] for m in with_instr]}｜无指令={[m['role'] for m in no_instr]}"
+
     for name, fn in [
         ("配置与人设加载", t_config),
         ("记忆写入与中文检索", t_memory),
@@ -331,6 +415,10 @@ def run_selftest(cfg: dict) -> int:
         ("pi_agent 参数校验", t_pi_args),
         ("删除文件真正可用（回归修复）", t_delete_file),
         ("对外接口单行JSON协议", t_api_protocol),
+        ("情绪模型演化与边界", t_emotion_model),
+        ("情绪持久化（重启可读）", t_emotion_persist),
+        ("MiMo风格指令（导演模式）", t_emotion_style),
+        ("TTS消息结构符合官方规范", t_tts_messages),
     ]:
         check(name, fn)
 

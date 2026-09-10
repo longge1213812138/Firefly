@@ -1,13 +1,15 @@
 """流萤 · 控制台（GUI 操作台，对应需求 F-03）。
 
-五个标签页：
+六个标签页：
   ① 对话  —— 文字聊天（与语音模式同一套大脑/记忆/安全闸口），可点「🎙 说话」
-             用麦克风说一句；危险操作会弹窗确认（撤销清单）。
+             用麦克风说一句；危险操作会弹窗确认（撤销清单）；支持输入 /pi 任务。
   ② 记忆  —— 浏览与检索全部历史对话（本地 SQLite）。
-  ③ 配置  —— API Key（掩码显示）、模型、TTS 音色/模型、唤醒词、录音阈值、桌宠开关、
+  ③ 情感  —— 程序化情绪模型（愉悦度/唤醒度/亲密度）实时状态、情绪曲线、
+             发给 MiMo-TTS 的风格指令预览（对齐小米官方情绪方案）、手动微调。
+  ④ 配置  —— API Key（掩码显示）、模型、TTS 音色/模型、唤醒词、录音阈值、桌宠开关、
              开机自启、人设编辑器。保存后自动重载大脑（人设即时生效）。
-  ④ 统计  —— 使用统计（对话次数、操作频率、分类分布、记忆库信息）。
-  ⑤ 状态  —— 一键体检（ASR/TTS/LLM）、离线自检、审计日志查看、数据位置说明。
+  ⑤ 统计  —— 使用统计（对话次数、操作频率、分类分布、记忆库信息）。
+  ⑥ 状态  —— 一键体检（ASR/TTS/LLM）、离线自检、审计日志查看、数据位置说明。
 
 仅依赖 Python 自带 tkinter；聊天与大模型调用都在后台线程，界面不卡。
 弹窗策略（本期约定）：危险操作=askyesno 弹窗；保存成功=提示框；退出=确认框。
@@ -210,6 +212,7 @@ class ConsoleApp:
         self.nb.pack(fill="both", expand=True, padx=8, pady=8)
         self._build_chat_tab()
         self._build_memory_tab()
+        self._build_emotion_tab()
         self._build_config_tab()
         self._build_stats_tab()
         self._build_status_tab()
@@ -362,7 +365,120 @@ class ConsoleApp:
         rows.reverse()
         return rows
 
-    # ============ ③ 配置 ============
+    # ============ ③ 情感（程序化情绪模型） ============
+    def _build_emotion_tab(self) -> None:
+        from core.emotion import EmotionModel
+
+        f = ttk.Frame(self.nb)
+        self.nb.add(f, text=" 情感 ")
+        self._emo = EmotionModel(self.cfg, db_path=self.cfg["memory"]["db_path"])
+
+        head = ttk.Frame(f)
+        head.pack(fill="x", padx=10, pady=(10, 2))
+        self.emo_title_var = tk.StringVar(value="")
+        ttk.Label(head, textvariable=self.emo_title_var, font=FONT_BOLD).pack(side="left")
+        self.emo_reason_var = tk.StringVar(value="")
+        ttk.Label(head, textvariable=self.emo_reason_var, font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=10)
+
+        self.emo_canvas = tk.Canvas(f, height=112, highlightthickness=0, background="#fbfbf7")
+        self.emo_canvas.pack(fill="x", padx=10, pady=(4, 4))
+
+        row = ttk.Frame(f)
+        row.pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Button(row, text="🔄 刷新", command=self._refresh_emotion).pack(side="left")
+        ttk.Button(row, text="🔁 重置到基准", command=self._reset_emotion).pack(side="left", padx=6)
+        ttk.Button(row, text="😊 开心一点", command=lambda: self._nudge_emotion(0.15, 0.10, 0)).pack(side="left")
+        ttk.Button(row, text="🌙 安静一点", command=lambda: self._nudge_emotion(-0.05, -0.18, 0)).pack(side="left", padx=6)
+        ttk.Button(row, text="💗 更亲近", command=lambda: self._nudge_emotion(0, 0, 0.05)).pack(side="left")
+
+        ttk.Label(f, text="将发给 MiMo-TTS 的风格指令（按官方规范放 role=user，可编辑后复制）",
+                  font=FONT_BOLD).pack(anchor="w", padx=10, pady=(6, 2))
+        self.emo_style_box = ScrolledText(f, height=9, font=FONT, wrap="word")
+        self.emo_style_box.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        ttk.Label(f, text="情绪变化（蓝＝愉悦度，绿＝唤醒度）", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(anchor="w", padx=10)
+        self.emo_hist_canvas = tk.Canvas(f, height=88, highlightthickness=0, background="#fbfbf7")
+        self.emo_hist_canvas.pack(fill="x", padx=10, pady=(2, 8))
+        self._refresh_emotion()
+
+    def _draw_bar(self, c: "tk.Canvas", y: int, label: str, value: float,
+                  lo: float, hi: float, color: str, fmt: str) -> None:
+        width = max(360, c.winfo_width() or 600)
+        left, right = 92, width - 58
+        c.create_text(8, y + 8, text=label, anchor="w", font=FONT_SMALL, fill="#444441")
+        c.create_rectangle(left, y, right, y + 16, outline="#d3d1c7", fill="#f1efe8")
+        frac = max(0.0, min(1.0, (value - lo) / (hi - lo) if hi > lo else 0.0))
+        x = left + (right - left) * frac
+        if lo < 0 <= hi:  # 有零点：从中点画，红右绿左之外还是用单色更清楚
+            zero = left + (right - left) * ((0 - lo) / (hi - lo))
+            c.create_rectangle(min(zero, x), y, max(zero, x), y + 16, outline="", fill=color)
+            c.create_line(zero, y - 3, zero, y + 19, fill="#888780")
+        else:
+            c.create_rectangle(left, y, x, y + 16, outline="", fill=color)
+        c.create_text(right + 6, y + 8, text=fmt.format(value), anchor="w",
+                      font=FONT_SMALL, fill="#2c2c2a")
+
+    def _draw_emotion_history(self) -> None:
+        c = self.emo_hist_canvas
+        c.delete("all")
+        rows = self._emo.history(40)
+        if len(rows) < 2:
+            c.create_text(8, 42, anchor="w", text="（还看不出变化，多聊几句就会出现曲线）",
+                          font=FONT_SMALL, fill="#8a8f98")
+            return
+        w, h, pad = max(360, c.winfo_width() or 600), 82, 8
+        c.create_line(pad, h / 2, w - pad, h / 2, fill="#d3d1c7")
+
+        def xy(i: int, val: float, lo: float, hi: float) -> tuple[float, float]:
+            x = pad + (w - 2 * pad) * (i / max(1, len(rows) - 1))
+            y = h - pad - (h - 2 * pad) * ((val - lo) / (hi - lo))
+            return x, y
+
+        for key, lo, hi, color in (("valence", -1.0, 1.0, "#378ADD"),
+                                   ("arousal", 0.0, 1.0, "#1D9E75")):
+            pts: list[float] = []
+            for i, r in enumerate(rows):
+                px, py = xy(i, float(r.get(key) or 0.0), lo, hi)
+                pts.extend((px, py))
+            if len(pts) >= 4:
+                c.create_line(*pts, fill=color, width=1.5)
+
+    def _refresh_emotion(self) -> None:
+        if getattr(self, "_emo", None) is None:
+            return
+        try:
+            s = self._emo.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.emo_title_var.set(f"读取情绪失败：{exc}")
+            return
+        self.emo_title_var.set(f"当前情绪：{s['label']}（{s['compound']}）｜累计 {s['turns']} 轮")
+        self.emo_reason_var.set(s["reason"] or "")
+        if not s["enabled"]:
+            self.emo_title_var.set("情绪模型已在 config.json 里关闭（emotion.enabled=false）")
+        c = self.emo_canvas
+        c.delete("all")
+        self._draw_bar(c, 4, "愉悦度", s["valence"], -1.0, 1.0, "#378ADD", "{:+.2f}")
+        self._draw_bar(c, 42, "唤醒度", s["arousal"], 0.0, 1.0, "#1D9E75", "{:.2f}")
+        self._draw_bar(c, 80, "亲密度", s["intimacy"], 0.0, 1.0, "#BA7517", "{:.2f}")
+        self.emo_style_box.delete("1.0", "end")
+        self.emo_style_box.insert("1.0", s["style_preview"])
+        self._draw_emotion_history()
+
+    def _reset_emotion(self) -> None:
+        if getattr(self, "_emo", None) is None:
+            return
+        self._emo.reset()
+        self._refresh_emotion()
+
+    def _nudge_emotion(self, dv: float, da: float, di: float) -> None:
+        if getattr(self, "_emo", None) is None:
+            return
+        self._emo.nudge(dv, da, di)
+        self._refresh_emotion()
+
+    # ============ ④ 配置 ============
     def _build_config_tab(self) -> None:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 配置 ")
@@ -568,7 +684,7 @@ class ConsoleApp:
         if path:
             self.ref_audio_var.set(path)
 
-    # ============ ④ 统计 ============
+    # ============ ⑤ 统计 ============
     def _build_stats_tab(self) -> None:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 统计 ")
@@ -651,7 +767,7 @@ class ConsoleApp:
         except Exception as exc:
             messagebox.showerror("清理失败", str(exc))
 
-    # ============ ⑤ 状态 ============
+    # ============ ⑥ 状态 ============
     def _build_status_tab(self) -> None:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 状态 ")
@@ -728,6 +844,8 @@ class ConsoleApp:
                 self._chat_append("user", msg[1])
             elif kind == "chat_fairy":
                 self._chat_append("fairy", msg[1])
+                if getattr(self, "_emo", None) is not None:
+                    self._refresh_emotion()
             elif kind == "chat_sys":
                 self._chat_append("sys", msg[1])
             elif kind == "status":

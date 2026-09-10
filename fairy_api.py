@@ -30,7 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 def _emit(obj: dict, code: int = 0) -> int:
