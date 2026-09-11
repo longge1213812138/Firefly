@@ -236,6 +236,23 @@ def run_selftest(cfg: dict) -> int:
         tk_ok = gui.tk is not None
         return not missing and tk_ok, f"缺失={missing}｜tkinter 可用={tk_ok}"
 
+    # 14b. 桌宠配置解析：默认值 / 非法值钳制 / 退出命令（纯函数，不弹窗口）
+    def t_pet_options():
+        from core.pet import CMD_QUIT, STATES, resolve_pet_options
+
+        d = resolve_pet_options(None)
+        ok_default = (d["enabled"] is True and d["demo"] is False and d["scale"] == 1.0
+                      and d["opacity"] == 1.0 and d["start_x"] is None and d["start_y"] is None)
+        bad = resolve_pet_options({"pet": {"scale": "很大", "opacity": 99,
+                                           "start_x": "abc", "start_y": "120.7"}})
+        ok_clamp = (bad["scale"] == 1.0 and bad["opacity"] == 1.0
+                    and bad["start_x"] is None and bad["start_y"] == 120)
+        hi = resolve_pet_options({"pet": {"scale": 99, "opacity": 0.01}})
+        ok_range = hi["scale"] == 2.5 and hi["opacity"] == 0.3
+        ok_quit = CMD_QUIT not in STATES
+        return (ok_default and ok_clamp and ok_range and ok_quit,
+                f"默认={ok_default} 非法钳制={ok_clamp} 边界={ok_range} 退出命令独立={ok_quit}")
+
     # 15. 外部 agent 后端注册表与参数拼装（离线，不真的调 Pi）
     def t_agent_backend():
         from core import agent_backend
@@ -520,6 +537,7 @@ def run_selftest(cfg: dict) -> int:
         ("硬闸口（删除/覆盖/外发强制确认）", t_safety_hard),
         ("批量 ACTION 解析（撤销清单）", t_extract_actions),
         ("桌宠状态机", t_pet_brain),
+        ("桌宠配置解析（缩放/透明度/位置钳制）", t_pet_options),
         ("GUI 模块（tkinter）", t_gui_module),
         ("外部agent后端注册与参数拼装", t_agent_backend),
         ("pi_agent 硬闸口", t_pi_safety),

@@ -444,21 +444,25 @@ class Fairy:
             self._set_state("idle")
 
     # ---------- 主循环 ----------
-    def run_voice(self) -> None:
-        # 桌宠（config.json 的 pet.enabled 可关闭；失败不影响语音对话）
-        if self.cfg.get("pet", {}).get("enabled", True):
-            try:
-                import tkinter  # noqa: F401 — 先检测 tkinter 是否可用
-                from core.pet import start_pet_thread
+    def _maybe_start_pet(self) -> None:
+        """按配置启动桌宠并把对话状态接到它的队列（pet.enabled=false 或失败都不影响对话）。"""
+        if not self.cfg.get("pet", {}).get("enabled", True):
+            return
+        try:
+            import tkinter  # noqa: F401 — 先检测 tkinter 是否可用
+            from core.pet import start_pet_thread
 
-                pet_q = start_pet_thread(self.cfg)
-                self.on_state = lambda s: pet_q.put(s)
-                print("🧚 桌宠已上线：可拖拽、拖到屏幕边缘贴边隐藏；右键有菜单，双击可预览四种状态", flush=True)
-            except ImportError as exc:  # noqa: BLE001
-                print(f"（桌宠未能启动：缺少 tkinter —— 你的 Python 可能是精简版，没有自带 GUI 库。"
-                      f"不影响语音对话。）", flush=True)
-            except Exception as exc:  # noqa: BLE001
-                print(f"（桌宠未能启动，不影响语音对话：{exc}）", flush=True)
+            pet_q = start_pet_thread(self.cfg)
+            self.on_state = lambda s: pet_q.put(s)
+            print("🧚 桌宠已上线：可拖拽、拖到屏幕边缘贴边隐藏；右键有菜单，双击可预览四种状态", flush=True)
+        except ImportError:  # noqa: BLE001
+            print("（桌宠未能启动：缺少 tkinter —— 你的 Python 可能是精简版，没有自带 GUI 库。"
+                  "不影响对话。）", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"（桌宠未能启动，不影响对话：{exc}）", flush=True)
+
+    def run_voice(self) -> None:
+        self._maybe_start_pet()
 
         waker = WakeListener(self.cfg["wake"], sample_rate=int(self.cfg["audio"]["sample_rate"]),
                              device=self.cfg["audio"].get("input_device"))
@@ -542,6 +546,7 @@ class Fairy:
                 self.emotion.close()
 
     def run_text(self) -> None:
+        self._maybe_start_pet()
         print("\n【键盘模式】直接打字回车即可对话；输入 q 退出。", flush=True)
         print("   想让 Pi 帮忙：输入 /pi 任务（例如「/pi 帮我看看这个项目的结构」）", flush=True)
         print(f"   会话 ID：{self.session_id}｜历史记忆：{self.memory.count()} 条\n", flush=True)

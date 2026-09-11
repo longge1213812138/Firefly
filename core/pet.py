@@ -9,6 +9,15 @@
 窗口无边框、置顶、背景透明（Windows transparentcolor）；
 支持拖拽移动、贴边隐藏（拖到屏幕左右边缘）、双击切换演示模式、右键菜单。
 纯逻辑部分在 PetBrain（不依赖窗口，可离线自检）。
+
+配置（config.json 的 pet 段，统一由 resolve_pet_options 解析）：
+  enabled  启动程序时自动显示桌宠（控制台 / 语音 / 键盘模式都遵守）
+  demo     循环演示四种状态
+  scale    桌宠缩放 0.5~2.5（默认 1.0）
+  opacity  不透明度 0.3~1.0（默认 1.0）
+  start_x / start_y  固定初始位置（留空 = 屏幕右下角）
+
+控制命令：往状态队列 put(CMD_QUIT) 可让桌宠自行关闭（控制台退出时联动用）。
 """
 from __future__ import annotations
 
@@ -26,6 +35,40 @@ STATES = ("idle", "listening", "thinking", "speaking")
 STATE_TEXT = {"idle": "待机中", "listening": "聆听中", "thinking": "思考中", "speaking": "说话中"}
 GLOW = ["#2e3318", "#4c551f", "#6f7d2a", "#93a838", "#bcd451", "#e2f76f", "#fbffbe"]
 BG = "#0a0a0e"  # 作为透明色使用，绘制时避开这个确切颜色
+
+CMD_QUIT = "__quit__"  # 状态队列里的特殊命令：让桌宠关闭窗口（不是四种状态之一）
+
+
+def resolve_pet_options(cfg: dict | None) -> dict:
+    """把 config.json 的 pet 段解析成一组「保证合法」的选项（纯函数，可离线自检）。
+
+    非法 / 缺失的值一律回落到默认，并钳制在安全范围内，避免窗口飞出屏幕或完全透明。
+    """
+    pet_cfg = (cfg or {}).get("pet", {}) or {}
+
+    def _num(value, default: float, lo: float, hi: float) -> float:
+        try:
+            x = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, x))
+
+    def _pos(value) -> int | None:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "enabled": bool(pet_cfg.get("enabled", True)),
+        "demo": bool(pet_cfg.get("demo", False)),
+        "scale": _num(pet_cfg.get("scale", 1.0), 1.0, 0.5, 2.5),
+        "opacity": _num(pet_cfg.get("opacity", 1.0), 1.0, 0.3, 1.0),
+        "start_x": _pos(pet_cfg.get("start_x")),
+        "start_y": _pos(pet_cfg.get("start_y")),
+    }
 
 
 class PetBrain:
@@ -78,6 +121,10 @@ class FairyPet:
     def __init__(self, cfg: dict | None = None, q: "queue.Queue[str] | None" = None, demo: bool = False):
         if tk is None:
             raise RuntimeError("当前 Python 没有自带 tkinter，无法显示桌宠")
+        self.opts = resolve_pet_options(cfg)
+        self.scale = float(self.opts["scale"])
+        self.win_w = int(self.W * self.scale)
+        self.win_h = int(self.H * self.scale)
         self.brain = PetBrain()
         self.q = q or queue.Queue()
         self.demo = demo
@@ -96,15 +143,23 @@ class FairyPet:
             self.root.attributes("-transparentcolor", BG)
         except Exception:
             pass
+        try:
+            self.root.attributes("-alpha", float(self.opts["opacity"]))
+        except Exception:
+            pass
 
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        pet_cfg = (cfg or {}).get("pet", {}) or {}
-        x = int(pet_cfg.get("start_x") or (sw - self.W - 40))
-        y = int(pet_cfg.get("start_y") or max(60, sh - self.H - 180))
-        self.root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        x = self.opts["start_x"]
+        y = self.opts["start_y"]
+        if x is None:
+            x = sw - self.win_w - 40
+        if y is None:
+            y = max(60, sh - self.win_h - 180)
+        self.root.geometry(f"{self.win_w}x{self.win_h}+{x}+{y}")
 
-        self.canvas = tk.Canvas(self.root, width=self.W, height=self.H, bg=BG, highlightthickness=0)
+        self.canvas = tk.Canvas(self.root, width=self.win_w, height=self.win_h,
+                                bg=BG, highlightthickness=0)
         self.canvas.pack()
         self._bind()
         self._tick()
@@ -135,9 +190,9 @@ class FairyPet:
         sw = self.root.winfo_screenwidth()
         if x <= 40:
             self.edge = "left"
-            self.root.geometry(f"+{-self.W + 18}+{self.root.winfo_y()}")
+            self.root.geometry(f"+{-self.win_w + 18}+{self.root.winfo_y()}")
             self.hidden = True
-        elif x >= sw - self.W - 40:
+        elif x >= sw - self.win_w - 40:
             self.edge = "right"
             self.root.geometry(f"+{sw - 18}+{self.root.winfo_y()}")
             self.hidden = True
@@ -146,7 +201,7 @@ class FairyPet:
         if not self.hidden:
             return
         sw = self.root.winfo_screenwidth()
-        x = 20 if self.edge == "left" else sw - self.W - 20
+        x = 20 if self.edge == "left" else sw - self.win_w - 20
         self.root.geometry(f"+{x}+{self.root.winfo_y()}")
         self.hidden = False
 
@@ -166,9 +221,13 @@ class FairyPet:
     def _tick(self) -> None:
         while True:
             try:
-                self.brain.set_state(self.q.get_nowait())
+                msg = self.q.get_nowait()
             except queue.Empty:
                 break
+            if msg == CMD_QUIT:  # 控制台退出 / 应用新设置时联动关闭
+                self.root.destroy()
+                return
+            self.brain.set_state(msg)
         if self.demo and time.time() - self._demo_ts > 2.2:
             order = list(STATES)
             self.brain.set_state(order[(order.index(self.brain.state) + 1) % len(order)])
@@ -250,7 +309,11 @@ class FairyPet:
 
         # 状态文字
         c.create_text(75, 158, text=STATE_TEXT[b.state], fill="#9aa4b5",
-                      font=("Microsoft YaHei UI", 9))
+                      font=("Microsoft YaHei UI", max(6, int(9 * self.scale))))
+
+        # 整体缩放（画布所有图元按 scale 放大/缩小；scale=1 时零开销跳过）
+        if self.scale != 1.0:
+            c.scale("all", 0, 0, self.scale, self.scale)
 
 
 def run_pet(cfg: dict | None = None, q: "queue.Queue[str] | None" = None, demo: bool = False) -> None:
@@ -259,20 +322,32 @@ def run_pet(cfg: dict | None = None, q: "queue.Queue[str] | None" = None, demo: 
 
 
 def start_pet_thread(cfg: dict | None = None, demo: bool | None = None) -> "queue.Queue[str]":
-    """在后台线程启动桌宠，返回状态队列：put('listening') 等即可切换状态。"""
+    """在后台线程启动桌宠，返回状态队列：put('listening') 等即可切换状态。
+
+    往队列 put(CMD_QUIT) 可让桌宠关闭（例如控制台退出、应用新设置时）。
+    """
     q: "queue.Queue[str]" = queue.Queue()
-    pet_cfg = (cfg or {}).get("pet", {}) or {}
-    use_demo = bool(pet_cfg.get("demo", False)) if demo is None else demo
+    opts = resolve_pet_options(cfg)
+    use_demo = opts["demo"] if demo is None else demo
 
     def _run() -> None:
         try:
-            run_pet({"pet": pet_cfg}, q, demo=use_demo)
+            run_pet(cfg, q, demo=use_demo)
         except Exception as exc:  # noqa: BLE001 - 桌宠失败不应拖垮主流程
             import sys
             print(f"（桌宠线程异常：{exc}）", file=sys.stderr, flush=True)
 
     threading.Thread(target=_run, daemon=True, name="fairy-pet").start()
     return q
+
+
+def stop_pet(q: "queue.Queue[str] | None") -> None:
+    """让指定桌宠关闭窗口（幂等：q 为空或桌宠已关都没事）。"""
+    if q is not None:
+        try:
+            q.put(CMD_QUIT)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main() -> int:

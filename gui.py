@@ -6,7 +6,8 @@
   ② 记忆  —— 浏览与检索全部历史对话（本地 SQLite）。
   ③ 情感  —— 程序化情绪模型（愉悦度/唤醒度/亲密度）实时状态、情绪曲线、
              发给 MiMo-TTS 的风格指令预览（对齐小米官方情绪方案）、手动微调。
-  ④ 配置  —— API Key（掩码显示）、模型、TTS 音色/模型、唤醒词、录音阈值、桌宠开关、
+  ④ 配置  —— API Key（掩码显示）、模型、TTS 音色/模型、唤醒词、录音阈值、
+             桌宠（开关/大小/不透明度/初始位置/演示模式，可一键重启应用）、
              开机自启、人设编辑器。保存后自动重载大脑（人设即时生效）。
   ⑤ 统计  —— 使用统计（对话次数、操作频率、分类分布、记忆库信息）。
   ⑥ 状态  —— 一键体检（ASR/TTS/LLM）、离线自检、审计日志查看、数据位置说明。
@@ -241,7 +242,73 @@ class ConsoleApp:
         self._build_stats_tab()
         self._build_status_tab()
 
+        # 桌宠随控制台同步启动（pet.enabled 可关）；对话状态会实时转发给它
+        self.pet_q: "queue.Queue[str] | None" = None
+        self._start_pet_if_enabled()
+
         self.root.after(150, self._poll_ui)
+
+    # ============ 桌宠联动 ============
+    def _start_pet_if_enabled(self) -> None:
+        """控制台启动时把桌宠一起带出来——双击 exe 后两者同步出现。"""
+        from core.pet import resolve_pet_options, start_pet_thread
+
+        if not resolve_pet_options(self.cfg)["enabled"]:
+            return
+        try:
+            self.pet_q = start_pet_thread(self.cfg)
+            self.status_var.set("就绪｜桌宠已同步启动")
+        except Exception as exc:  # noqa: BLE001
+            self.status_var.set(f"桌宠未能启动（不影响控制台使用）：{exc}")
+
+    def _current_pet_options(self) -> dict:
+        """读取配置页上当前填写的桌宠设置（未保存也能先用于临时重启）。"""
+        from core.pet import resolve_pet_options
+
+        return resolve_pet_options({"pet": {
+            "enabled": bool(self.pet_var.get()),
+            "demo": bool(self.pet_demo_var.get()),
+            "scale": self.pet_scale_var.get(),
+            "opacity": self.pet_opacity_var.get(),
+            "start_x": self.pet_x_var.get().strip() or None,
+            "start_y": self.pet_y_var.get().strip() or None,
+        }})
+
+    def _restart_pet(self) -> None:
+        """关掉现有桌宠，按配置页当前填写的值重新启动（不写盘，保存配置才永久生效）。"""
+        from core.pet import start_pet_thread, stop_pet
+
+        opts = self._current_pet_options()
+        stop_pet(self.pet_q)
+        self.pet_q = None
+        if not opts["enabled"]:
+            self.status_var.set("桌宠已关闭｜想重新打开：勾选「自动显示桌宠」后再点重启")
+            return
+        cfg = dict(self.cfg)
+        cfg["pet"] = dict(opts)
+        try:
+            self.pet_q = start_pet_thread(cfg)
+            self.status_var.set("桌宠已按当前设置重启｜要永久生效请点「保存配置」")
+        except Exception as exc:  # noqa: BLE001
+            self.status_var.set(f"桌宠重启失败：{exc}")
+
+    def _preview_pet(self) -> None:
+        """让桌宠轮流展示四种状态一轮，方便调整大小/透明度时看效果。"""
+        if self.pet_q is None:
+            messagebox.showinfo("桌宠未在运行", "先勾选「启动程序时自动显示桌宠」，再点「重启桌宠」。")
+            return
+        from core.pet import STATES
+
+        q = self.pet_q
+
+        def work() -> None:
+            for s in STATES:
+                q.put(s)
+                time.sleep(1.2)
+            q.put("idle")
+
+        threading.Thread(target=work, daemon=True, name="fairy-pet-preview").start()
+        self.status_var.set("桌宠正在演示四种状态……")
 
     # ============ ① 对话 ============
     def _build_chat_tab(self) -> None:
@@ -829,13 +896,52 @@ class ConsoleApp:
         ttk.Checkbutton(wrap, text="允许语音打断（说话时插话它就闭嘴）",
                         variable=self.barge_var).grid(row=next_row(), column=1, sticky="w", pady=3)
 
-        self.pet_var = tk.BooleanVar(value=bool(self.cfg.get("pet", {}).get("enabled", True)))
-        ttk.Checkbutton(wrap, text="语音模式启动时显示桌宠",
-                        variable=self.pet_var).grid(row=next_row(), column=1, sticky="w", pady=3)
-
         self.autostart_var = tk.BooleanVar(value=autostart_enabled())
         ttk.Checkbutton(wrap, text="开机自动启动助手", variable=self.autostart_var,
                         command=self._toggle_autostart).grid(row=next_row(), column=1, sticky="w", pady=3)
+
+        # ---------- 桌宠（小萤火虫） ----------
+        from core.pet import resolve_pet_options as _pet_opts
+
+        _po = _pet_opts(self.cfg)
+        ttk.Label(wrap, text="桌宠（小萤火虫）", font=FONT_BOLD).grid(
+            row=next_row(), column=0, columnspan=3, sticky="w", pady=(12, 2))
+
+        petrow1 = ttk.Frame(wrap)
+        petrow1.grid(row=next_row(), column=0, columnspan=3, sticky="we")
+        self.pet_var = tk.BooleanVar(value=_po["enabled"])
+        ttk.Checkbutton(petrow1, text="启动程序时自动显示桌宠（控制台 / 语音 / 键盘模式都遵守）",
+                        variable=self.pet_var).pack(side="left")
+        self.pet_demo_var = tk.BooleanVar(value=_po["demo"])
+        ttk.Checkbutton(petrow1, text="演示模式（循环展示四种状态）",
+                        variable=self.pet_demo_var).pack(side="left", padx=10)
+
+        petrow2 = ttk.Frame(wrap)
+        petrow2.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(2, 3))
+        ttk.Label(petrow2, text="大小", font=FONT).pack(side="left")
+        self.pet_scale_var = tk.StringVar(value=f"{_po['scale']:g}")
+        ttk.Combobox(petrow2, textvariable=self.pet_scale_var, width=5, state="readonly",
+                     values=["0.6", "0.8", "1.0", "1.2", "1.5", "2.0"]).pack(side="left", padx=(2, 10))
+        ttk.Label(petrow2, text="不透明度", font=FONT).pack(side="left")
+        self.pet_opacity_var = tk.StringVar(value=f"{_po['opacity']:g}")
+        ttk.Combobox(petrow2, textvariable=self.pet_opacity_var, width=5, state="readonly",
+                     values=["0.5", "0.7", "0.85", "1.0"]).pack(side="left", padx=(2, 10))
+        ttk.Label(petrow2, text="初始位置 X", font=FONT).pack(side="left")
+        self.pet_x_var = tk.StringVar(value="" if _po["start_x"] is None else str(_po["start_x"]))
+        ttk.Entry(petrow2, textvariable=self.pet_x_var, width=6).pack(side="left", padx=(2, 6))
+        ttk.Label(petrow2, text="Y", font=FONT).pack(side="left")
+        self.pet_y_var = tk.StringVar(value="" if _po["start_y"] is None else str(_po["start_y"]))
+        ttk.Entry(petrow2, textvariable=self.pet_y_var, width=6).pack(side="left", padx=(2, 6))
+        ttk.Label(petrow2, text="留空=屏幕右下角", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        petrow3 = ttk.Frame(wrap)
+        petrow3.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(0, 3))
+        ttk.Button(petrow3, text="🐾 重启桌宠（按上方设置立刻生效）",
+                   command=self._restart_pet).pack(side="left")
+        ttk.Button(petrow3, text="👀 预览四种状态", command=self._preview_pet).pack(side="left", padx=8)
+        ttk.Label(petrow3, text="重启只临时生效；点「保存配置」才会写入 config.json",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=4)
 
         # ---------- 情绪模型 ----------
         ttk.Label(wrap, text="情绪模型（程序化）", font=FONT_BOLD).grid(
@@ -950,10 +1056,19 @@ class ConsoleApp:
             emo_i = float(self.emo_base_i_var.get())
             emo_decay = float(self.emo_decay_var.get())
             pi_timeout = float(self.pi_timeout_var.get())
+            pet_scale = float(self.pet_scale_var.get())
+            pet_opacity = float(self.pet_opacity_var.get())
         except ValueError:
             messagebox.showerror("格式不对",
-                                 "阈值 / 温度 / 情绪基准 / 平复比例 / Pi 超时 都要填数字"
-                                 "（例如 0.008、0.9、0.25、0.12、600）")
+                                 "阈值 / 温度 / 情绪基准 / 平复比例 / Pi 超时 / 桌宠大小与不透明度 "
+                                 "都要填数字（例如 0.008、0.9、0.25、0.12、600、1.0）")
+            return
+        sx, sy = self.pet_x_var.get().strip(), self.pet_y_var.get().strip()
+        try:
+            pet_x = int(sx) if sx else None
+            pet_y = int(sy) if sy else None
+        except ValueError:
+            messagebox.showerror("格式不对", "桌宠初始位置 X / Y 要填整数（像素），或者留空。")
             return
         cfg_path = APP_ROOT / "config.json"
         try:
@@ -982,6 +1097,11 @@ class ConsoleApp:
         raw["audio"]["barge_in"] = bool(self.barge_var.get())
         raw.setdefault("pet", {})
         raw["pet"]["enabled"] = bool(self.pet_var.get())
+        raw["pet"]["demo"] = bool(self.pet_demo_var.get())
+        raw["pet"]["scale"] = pet_scale
+        raw["pet"]["opacity"] = pet_opacity
+        raw["pet"]["start_x"] = pet_x
+        raw["pet"]["start_y"] = pet_y
         # 情绪模型
         raw.setdefault("emotion", {})
         raw["emotion"]["enabled"] = bool(self.emo_enabled_var.get())
@@ -1001,9 +1121,11 @@ class ConsoleApp:
         raw["pi"]["timeout"] = pi_timeout
         raw["pi"]["mode"] = self.pi_mode_var.get().strip() or "text"
         cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.cfg = load_config()  # 内存里的配置同步刷新（桌宠重启等会用到）
         self.worker.submit("reload")
         messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n"
-                                      "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置）")
+                                      "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置；\n"
+                                      "  桌宠设置点「重启桌宠」立即生效）")
 
     def _toggle_autostart(self) -> None:
         enable = bool(self.autostart_var.get())
@@ -1223,7 +1345,8 @@ class ConsoleApp:
                 box["ok"] = messagebox.askyesno("⚠️ 危险操作确认", prompt, icon="warning")
                 ev.set()
             elif kind == "pet_state":
-                pass  # 预留：GUI 内嵌状态指示
+                if self.pet_q is not None:
+                    self.pet_q.put(msg[1])  # 对话状态实时驱动桌宠表情
             elif kind == "log_line":
                 self.tool_box.configure(state="normal")
                 self.tool_box.insert("end", msg[1] + "\n")
@@ -1254,6 +1377,11 @@ class ConsoleApp:
         if self.busy and not messagebox.askyesno(
                 "退出", "Fairy 正在回复中，退出将中断本轮对话。确定退出？"):
             return
+        # 桌宠与控制台同生共死：退出控制台时把桌宠一起关掉
+        from core.pet import stop_pet
+
+        stop_pet(self.pet_q)
+        self.pet_q = None
         self._stop_tray()
         self.root.destroy()
 

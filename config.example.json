@@ -79,9 +79,11 @@
   },
 
   "pet": {
-    "_说明": "桌宠小萤火虫。enabled=true 时启动语音助手会同时显示桌宠；demo=true 时循环演示四种状态；start_x/start_y 填数字可固定初始位置，留空则出现在屏幕右下角。",
+    "_说明": "桌宠小萤火虫。enabled=true 时启动程序（控制台 / 语音 / 键盘模式）会同时带出桌宠；demo=true 循环演示四种状态；scale 大小 0.5~2.5；opacity 不透明度 0.3~1.0；start_x/start_y 填数字可固定初始位置，留空则出现在屏幕右下角。这些都能在控制台的「配置」页里改。",
     "enabled": true,
     "demo": false,
+    "scale": 1.0,
+    "opacity": 1.0,
     "start_x": null,
     "start_y": null
   },
