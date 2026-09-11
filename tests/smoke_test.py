@@ -467,6 +467,54 @@ def run_selftest(cfg: dict) -> int:
               and len(no_instr) == 1 and no_instr[0]["role"] == "assistant")
         return ok, f"有指令={[m['role'] for m in with_instr]}｜无指令={[m['role'] for m in no_instr]}"
 
+    # 25b. 声音设置：音色映射 / 参考音频校验 / 必填项检查（离线，不发请求）
+    def t_voice_settings():
+        from core import audio_io
+        from core.tts import (tts_settings_issues, validate_reference_audio,
+                              voice_choices, voice_display_for_id, voice_id_for_display)
+
+        # 音色下拉映射：展示名 ↔ ID 能互相还原
+        choices = voice_choices()
+        ids = [vid for _, vid in choices]
+        ok_map = ("mimo_default" in ids and len(choices) >= 8
+                  and voice_id_for_display(choices[0][0]) == choices[0][1]
+                  and voice_display_for_id("mimo_default") == choices[0][0]
+                  and voice_id_for_display("自定义xyz") == "自定义xyz")
+
+        with tempfile.TemporaryDirectory() as td:
+            import numpy as np
+
+            wav_path = Path(td) / "ref.wav"
+            tone = (np.sin(np.linspace(0, 6.28 * 12, 16000 * 12)) * 8000).astype(np.int16)
+            wav_path.write_bytes(audio_io.to_wav_bytes(tone, 16000))
+            ok_wav, msg_wav = validate_reference_audio(str(wav_path))     # 12 秒 wav → 可用
+            ok_missing, _ = validate_reference_audio(str(Path(td) / "nope.wav"))
+            bad = Path(td) / "ref.flac"
+            bad.write_bytes(b"x" * 100)
+            ok_flac, msg_flac = validate_reference_audio(str(bad))        # 官方只收 wav/mp3
+            empty = Path(td) / "ref.mp3"
+            empty.write_bytes(b"")
+            ok_empty, _ = validate_reference_audio(str(empty))
+            ref_ok = str(wav_path)
+            clone_ok = tts_settings_issues({"model": "mimo-v2.5-tts-voiceclone", "voice": "",
+                                            "voice_instruction": "", "reference_audio_path": ref_ok})
+
+        clone_missing = tts_settings_issues({"model": "mimo-v2.5-tts-voiceclone", "voice": "",
+                                             "voice_instruction": "", "reference_audio_path": ""})
+        design_missing = tts_settings_issues({"model": "mimo-v2.5-tts-voicedesign", "voice": "",
+                                              "voice_instruction": "", "reference_audio_path": ""})
+        preset_ok = tts_settings_issues({"model": "mimo-v2.5-tts", "voice": "mimo_default",
+                                         "voice_instruction": "", "reference_audio_path": ""})
+        bad_model = tts_settings_issues({"model": "不存在的模型", "voice": "x",
+                                         "voice_instruction": "", "reference_audio_path": ""})
+        ok_issues = (clone_ok == [] and any("参考音频" in i for i in clone_missing)
+                     and any("音色描述" in i for i in design_missing)
+                     and preset_ok == [] and any("模型" in i for i in bad_model))
+        ok = (ok_map and ok_wav and (not ok_missing) and (not ok_flac)
+              and (not ok_empty) and ok_issues)
+        return ok, (f"映射={ok_map}｜12s wav={ok_wav}({msg_wav})｜flac拦截={not ok_flac}"
+                    f"｜空文件拦截={not ok_empty}｜必填校验={ok_issues}")
+
     # 26. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
     def t_memory_admin():
         from core.memory import Memory
@@ -550,6 +598,7 @@ def run_selftest(cfg: dict) -> int:
         ("情绪持久化（重启可读）", t_emotion_persist),
         ("MiMo风格指令（导演模式）", t_emotion_style),
         ("TTS消息结构符合官方规范", t_tts_messages),
+        ("声音设置校验（音色/参考音频/必填项）", t_voice_settings),
         ("记忆管理（筛选/翻页/删除）", t_memory_admin),
         ("打包后项目根指向exe目录", t_frozen_root),
     ]:

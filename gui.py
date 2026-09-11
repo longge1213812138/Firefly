@@ -6,7 +6,8 @@
   ② 记忆  —— 浏览与检索全部历史对话（本地 SQLite）。
   ③ 情感  —— 程序化情绪模型（愉悦度/唤醒度/亲密度）实时状态、情绪曲线、
              发给 MiMo-TTS 的风格指令预览（对齐小米官方情绪方案）、手动微调。
-  ④ 配置  —— API Key（掩码显示）、模型、TTS 音色/模型、唤醒词、录音阈值、
+  ④ 配置  —— API Key（掩码显示）、模型、声音设置（合成方式/预置音色/音色描述/参考音频，
+             可试听、可现场录制、可单独保存）、唤醒词、录音阈值、
              桌宠（开关/大小/不透明度/初始位置/演示模式，可一键重启应用）、
              开机自启、人设编辑器。保存后自动重载大脑（人设即时生效）。
   ⑤ 统计  —— 使用统计（对话次数、操作频率、分类分布、记忆库信息）。
@@ -53,7 +54,9 @@ from core.config import is_frozen, load_config, load_persona, resolve_root  # no
 APP_ROOT = resolve_root()
 from core.memory import Memory  # noqa: E402
 from core.stats import UsageStats  # noqa: E402
-from core.tts import list_available_voices, get_voice_info  # noqa: E402
+from core.tts import (TTS_MODELS, list_available_voices, get_voice_info,  # noqa: E402
+                      tts_settings_issues, validate_reference_audio,
+                      voice_choices, voice_display_for_id, voice_id_for_display)
 
 FONT = ("Microsoft YaHei UI", 10)
 FONT_BOLD = ("Microsoft YaHei UI", 10, "bold")
@@ -831,40 +834,74 @@ class ConsoleApp:
         ttk.Entry(wrap, textvariable=self.baseurl_var, width=46).grid(
             row=row["n"], column=1, sticky="w", pady=3)
 
-        label("TTS 模型", font=FONT)
-        self.tts_model_var = tk.StringVar(value=self.cfg.get("tts", {}).get("model", "mimo-v2.5-tts"))
-        ttk.Combobox(wrap, textvariable=self.tts_model_var, width=43,
-                     values=["mimo-v2.5-tts", "mimo-v2.5-tts-voicedesign", "mimo-v2.5-tts-voiceclone"],
-                     state="readonly").grid(row=row["n"], column=1, sticky="w", pady=3)
-        ttk.Label(wrap, text="预置音色/文本设计/音频复刻", font=FONT_SMALL,
-                  foreground="#8a8f98").grid(row=row["n"], column=2, sticky="w", padx=6)
+        # ---------- 声音设置（MiMo TTS，对齐官方文档） ----------
+        vbox = ttk.LabelFrame(wrap, text=" 声音设置（小米 MiMo 语音合成） ")
+        vbox.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(10, 4))
 
-        label("音色（voice）", font=FONT)
-        self.voice_var = tk.StringVar(
-            value=self.cfg.get("tts", {}).get("voice") or mimo.get("voice", "mimo_default"))
-        ttk.Entry(wrap, textvariable=self.voice_var, width=46).grid(
-            row=row["n"], column=1, sticky="w", pady=3)
-        ttk.Label(wrap, text="预置音色ID或自定义音色标识", font=FONT_SMALL,
-                  foreground="#8a8f98").grid(row=row["n"], column=2, sticky="w", padx=6)
+        TTS_MODEL_DISPLAY = {
+            "mimo-v2.5-tts": "预置音色（官方精品声音，开箱即用）",
+            "mimo-v2.5-tts-voicedesign": "音色设计（用文字描述，定制一个声音）",
+            "mimo-v2.5-tts-voiceclone": "声音克隆（用一段录音，复刻你的声音）",
+        }
+        self._tts_model_display = TTS_MODEL_DISPLAY
 
-        # voicedesign音色描述
-        self.voice_instruction_var = tk.StringVar(value=self.cfg.get("tts", {}).get("voice_instruction", ""))
-        self.voice_instruction_frame = ttk.Frame(wrap)
-        self.voice_instruction_frame.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=3)
-        ttk.Label(self.voice_instruction_frame, text="音色描述（voicedesign用）", font=FONT).pack(side="left")
-        ttk.Entry(self.voice_instruction_frame, textvariable=self.voice_instruction_var, width=40).pack(side="left", padx=5)
-        ttk.Label(self.voice_instruction_frame, text="例：温柔甜美的年轻女性，语速适中", font=FONT_SMALL,
-                  foreground="#8a8f98").pack(side="left", padx=5)
+        vrow1 = ttk.Frame(vbox)
+        vrow1.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(vrow1, text="合成方式", font=FONT).pack(side="left")
+        cur_model = self.cfg.get("tts", {}).get("model", "mimo-v2.5-tts")
+        self.tts_model_var = tk.StringVar(value=TTS_MODEL_DISPLAY.get(cur_model, cur_model))
+        ttk.Combobox(vrow1, textvariable=self.tts_model_var, width=34, state="readonly",
+                     values=list(TTS_MODEL_DISPLAY.values())).pack(side="left", padx=(4, 8))
+        self.tts_model_hint_var = tk.StringVar()
+        ttk.Label(vrow1, textvariable=self.tts_model_hint_var, font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
 
-        # voiceclone参考音频
-        self.ref_audio_var = tk.StringVar(value=self.cfg.get("tts", {}).get("reference_audio_path", ""))
-        self.ref_audio_frame = ttk.Frame(wrap)
-        self.ref_audio_frame.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=3)
-        ttk.Label(self.ref_audio_frame, text="参考音频（voiceclone用）", font=FONT).pack(side="left")
-        ttk.Entry(self.ref_audio_frame, textvariable=self.ref_audio_var, width=35).pack(side="left", padx=5)
-        ttk.Button(self.ref_audio_frame, text="浏览...", command=self._browse_ref_audio).pack(side="left", padx=5)
-        ttk.Label(self.ref_audio_frame, text="10-30秒清晰人声音频", font=FONT_SMALL,
-                  foreground="#8a8f98").pack(side="left", padx=5)
+        vrow2 = ttk.Frame(vbox)
+        vrow2.pack(fill="x", padx=8, pady=2)
+        ttk.Label(vrow2, text="音色", font=FONT).pack(side="left")
+        cur_voice = self.cfg.get("tts", {}).get("voice") or mimo.get("voice", "mimo_default")
+        self.voice_var = tk.StringVar(value=voice_display_for_id(cur_voice))
+        ttk.Combobox(vrow2, textvariable=self.voice_var, width=28,
+                     values=[d for d, _ in voice_choices()]).pack(side="left", padx=(4, 8))
+        ttk.Label(vrow2, text="预置音色方式用；也可以手动输入音色 ID", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        vrow3 = ttk.Frame(vbox)
+        vrow3.pack(fill="x", padx=8, pady=2)
+        ttk.Label(vrow3, text="音色描述", font=FONT).pack(side="left")
+        self.voice_instruction_var = tk.StringVar(
+            value=self.cfg.get("tts", {}).get("voice_instruction", ""))
+        ttk.Entry(vrow3, textvariable=self.voice_instruction_var, width=42).pack(side="left", padx=(4, 8))
+        ttk.Label(vrow3, text="音色设计必填，例：温柔甜美的年轻女性，语速适中", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        vrow4 = ttk.Frame(vbox)
+        vrow4.pack(fill="x", padx=8, pady=2)
+        ttk.Label(vrow4, text="参考音频", font=FONT).pack(side="left")
+        self.ref_audio_var = tk.StringVar(
+            value=self.cfg.get("tts", {}).get("reference_audio_path", ""))
+        ttk.Entry(vrow4, textvariable=self.ref_audio_var, width=34).pack(side="left", padx=(4, 4))
+        ttk.Button(vrow4, text="浏览…", command=self._browse_ref_audio).pack(side="left")
+        ttk.Button(vrow4, text="🎙 现场录制", command=self._record_ref_audio).pack(side="left", padx=(4, 8))
+        ttk.Label(vrow4, text="声音克隆必填：10~30 秒清晰人声，仅支持 wav/mp3", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        vrow5 = ttk.Frame(vbox)
+        vrow5.pack(fill="x", padx=8, pady=(4, 2))
+        self.btn_voice_test = ttk.Button(vrow5, text="🔊 试听当前声音", command=self._test_voice)
+        self.btn_voice_test.pack(side="left")
+        ttk.Button(vrow5, text="✔ 校验参考音频", command=self._validate_ref_audio).pack(side="left", padx=6)
+        ttk.Button(vrow5, text="💾 保存声音设置", command=self._save_voice_settings).pack(side="left")
+
+        vrow6 = ttk.Frame(vbox)
+        vrow6.pack(fill="x", padx=8, pady=(0, 6))
+        self.voice_status_var = tk.StringVar(value="（改完先「试听」确认效果，满意后点「保存声音设置」）")
+        self.voice_status_label = ttk.Label(vrow6, textvariable=self.voice_status_var,
+                                            font=FONT_SMALL, foreground="#8a8f98")
+        self.voice_status_label.pack(side="left")
+
+        self.tts_model_var.trace_add("write", self._on_tts_model_change)
+        self._on_tts_model_change()
 
         label("性格随机度 temperature", font=FONT)
         self.temp_var = tk.StringVar(value=str(llm.get("temperature", 0.9)))
@@ -1085,10 +1122,11 @@ class ConsoleApp:
         raw["llm"]["base_url"] = self.baseurl_var.get().strip()
         raw["llm"]["temperature"] = temp
         raw.setdefault("tts", {})
-        raw["tts"]["model"] = self.tts_model_var.get().strip()
-        raw["tts"]["voice"] = self.voice_var.get().strip()
-        raw["tts"]["voice_instruction"] = self.voice_instruction_var.get().strip()
-        raw["tts"]["reference_audio_path"] = self.ref_audio_var.get().strip()
+        t = self._current_tts_settings()
+        raw["tts"]["model"] = t["model"]
+        raw["tts"]["voice"] = t["voice"]
+        raw["tts"]["voice_instruction"] = t["voice_instruction"]
+        raw["tts"]["reference_audio_path"] = t["reference_audio_path"]
         raw.setdefault("wake", {})
         raw["wake"]["keyword"] = self.keyword_var.get().strip()
         raw.setdefault("audio", {})
@@ -1140,20 +1178,164 @@ class ConsoleApp:
             self.autostart_var.set(not enable)
             messagebox.showerror("设置失败", str(exc))
 
+    # ============ 声音设置（MiMo TTS） ============
+    def _on_tts_model_change(self, *_args) -> None:
+        disp = self.tts_model_var.get()
+        hints = {
+            "mimo-v2.5-tts": "在下方「音色」里选一个喜欢的官方声音即可",
+            "mimo-v2.5-tts-voicedesign": "在下方「音色描述」写想要什么样的声音（必填），不用选音色",
+            "mimo-v2.5-tts-voiceclone": "在下方选或录一段 10~30 秒清晰人声（wav/mp3，必填），流萤复刻它",
+        }
+        model = self._display_to_tts_model(disp)
+        self.tts_model_hint_var.set(hints.get(model, ""))
+
+    def _display_to_tts_model(self, disp: str) -> str:
+        for mid, d in self._tts_model_display.items():
+            if disp == d or disp == mid:
+                return mid
+        return (disp or "").strip()
+
+    def _current_tts_settings(self) -> dict:
+        """读取界面上当前填写的声音设置（未保存也能用于试听）。"""
+        return {
+            "model": self._display_to_tts_model(self.tts_model_var.get()),
+            "voice": voice_id_for_display(self.voice_var.get()),
+            "voice_instruction": self.voice_instruction_var.get().strip(),
+            "reference_audio_path": self.ref_audio_var.get().strip(),
+        }
+
+    def _voice_feedback(self, ok: bool, text: str) -> None:
+        self.voice_status_var.set(("✅ " if ok else "❌ ") + text)
+        self.voice_status_label.configure(foreground="#1a7f37" if ok else "#c0392b")
+
+    def _save_voice_settings(self) -> None:
+        """只保存「声音设置」这一组，并立即重载大脑。"""
+        t = self._current_tts_settings()
+        issues = tts_settings_issues(t)
+        if issues:
+            self._voice_feedback(False, "保存失败：" + issues[0])
+            messagebox.showerror("声音设置不完整", "请先解决以下问题再保存：\n\n· " + "\n· ".join(issues))
+            return
+        cfg_path = APP_ROOT / "config.json"
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+            raw.setdefault("tts", {})
+            raw["tts"].update(t)
+            cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self._voice_feedback(False, f"保存失败：{exc}")
+            messagebox.showerror("保存失败", f"写入 config.json 时出错：\n{exc}")
+            return
+        self.cfg = load_config()
+        self.worker.submit("reload")
+        self._voice_feedback(True, f"声音设置已保存（{t['model']}），下一句对话生效")
+        messagebox.showinfo("已保存", "声音设置已保存，下一句对话立即用新声音。")
+
+    def _test_voice(self) -> None:
+        """用界面上当前填写的设置合成一句试听（不保存配置）。"""
+        t = self._current_tts_settings()
+        issues = tts_settings_issues(t)
+        if issues:
+            self._voice_feedback(False, "无法试听：" + issues[0])
+            messagebox.showerror("还不能试听", "请先解决：\n\n· " + "\n· ".join(issues))
+            return
+        api_key = self.key_var.get().strip() or self.cfg.get("mimo", {}).get("api_key", "")
+        if not api_key:
+            self._voice_feedback(False, "无法试听：还没配置 API Key")
+            messagebox.showerror("缺少 API Key", "请先在上方「API Key」里填入小米 MiMo 的 Key（tp- 开头）。")
+            return
+        self.btn_voice_test.configure(state="disabled")
+        self._voice_feedback(True, "正在合成试听……（联网，通常几秒钟）")
+
+        def work() -> None:
+            try:
+                from core.tts import make_tts
+                from core import audio_io
+
+                cfg2 = dict(self.cfg)
+                cfg2["mimo"] = {**self.cfg.get("mimo", {}), "api_key": api_key}
+                cfg2["tts"] = {**self.cfg.get("tts", {}), **t}
+                wav = make_tts(cfg2).synth(
+                    "你好，我是流萤，这是你当前选择的声音，听起来还满意吗？",
+                    t["voice_instruction"], t["reference_audio_path"] or None)
+                a = self.cfg.get("audio", {})
+                audio_io.play_wav_bytes(wav, device=a.get("output_device"),
+                                        tail_silence=float(a.get("output_tail_silence", 0.8)))
+                self.root.after(0, lambda: self._voice_feedback(
+                    True, f"试听成功：已用「{t['model']}」合成并播放"))
+            except Exception as exc:  # noqa: BLE001
+                reason = str(exc).strip() or exc.__class__.__name__
+                self.root.after(0, lambda r=reason: self._voice_feedback(False, f"试听失败：{r[:120]}"))
+                self.root.after(0, lambda r=reason: messagebox.showerror(
+                    "试听失败", f"声音合成没有成功，原因：\n\n{r}\n\n"
+                    "常见排查：API Key 是否正确 / 网络是否通畅 / 音色描述或参考音频是否符合要求。"))
+            finally:
+                self.root.after(0, lambda: self.btn_voice_test.configure(state="normal"))
+
+        threading.Thread(target=work, daemon=True, name="fairy-voice-test").start()
+
+    def _validate_ref_audio(self) -> None:
+        ok, detail = validate_reference_audio(self.ref_audio_var.get())
+        self._voice_feedback(ok, ("参考音频可用：" if ok else "参考音频有问题：") + detail)
+        if ok:
+            messagebox.showinfo("参考音频可用", detail)
+        else:
+            messagebox.showwarning("参考音频有问题", detail)
+
+    def _record_ref_audio(self) -> None:
+        """现场录制一段参考音频（声音克隆用），存到 data/reference_voice.wav。"""
+        secs = simpledialog.askinteger(
+            "录制参考音频", "录多少秒？（官方建议 10~30 秒清晰人声）",
+            initialvalue=15, minvalue=5, maxvalue=30, parent=self.root)
+        if not secs:
+            return
+        if not messagebox.askyesno(
+                "准备录音", f"点「是」立刻开始录 {secs} 秒。\n"
+                "请对着麦克风，用平时说话的音量念一段话（念什么都行，吐字清晰、环境安静最重要）。"):
+            return
+        self._voice_feedback(True, f"正在录音 {secs} 秒……请开始说话")
+
+        def work() -> None:
+            try:
+                from core import audio_io
+
+                a = self.cfg.get("audio", {})
+                data = audio_io.record_seconds(float(secs), int(a.get("sample_rate", 16000)),
+                                               device=a.get("input_device"))
+                rms, peak = audio_io.level_stats(data)
+                if peak < 0.01:
+                    raise RuntimeError("几乎没录到声音：检查麦克风是否被静音、是否选错设备（状态页有「麦克风体检」）")
+                out = APP_ROOT / "data" / "reference_voice.wav"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(audio_io.to_wav_bytes(data, int(a.get("sample_rate", 16000))))
+                ok, detail = validate_reference_audio(str(out))
+                def done() -> None:
+                    self.ref_audio_var.set(str(out))
+                    self._voice_feedback(ok, f"录音完成：{out.name}（{detail}）")
+                    messagebox.showinfo("录音完成", f"参考音频已保存到：\n{out}\n\n{detail}")
+                self.root.after(0, done)
+            except Exception as exc:  # noqa: BLE001
+                reason = str(exc).strip() or exc.__class__.__name__
+                self.root.after(0, lambda r=reason: self._voice_feedback(False, f"录音失败：{r[:120]}"))
+                self.root.after(0, lambda r=reason: messagebox.showerror("录音失败", r))
+
+        threading.Thread(target=work, daemon=True, name="fairy-ref-record").start()
+
     def _browse_ref_audio(self) -> None:
-        """浏览选择参考音频文件（voiceclone用）。"""
+        """浏览选择参考音频文件（voiceclone用，官方仅支持 wav/mp3）。"""
         from tkinter import filedialog
         filetypes = [
-            ("音频文件", "*.wav *.mp3 *.flac *.ogg *.m4a"),
+            ("音频文件（官方支持）", "*.wav *.mp3"),
             ("所有文件", "*.*"),
         ]
         path = filedialog.askopenfilename(
-            title="选择参考音频文件（10-30秒清晰人声）",
+            title="选择参考音频（10~30 秒清晰人声，wav/mp3）",
             filetypes=filetypes,
             initialdir=str(APP_ROOT / "data"),
         )
         if path:
             self.ref_audio_var.set(path)
+            self._validate_ref_audio()  # 选完立刻校验并给出反馈
 
     def _browse_pi_cli(self) -> None:
         path = filedialog.askopenfilename(
