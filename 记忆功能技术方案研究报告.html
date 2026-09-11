@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流萤 AI 记忆功能技术方案研究报告</title>
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-light: #818cf8;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-secondary: #64748b;
+            --border: #e2e8f0;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            font-size: 2rem;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+            border-bottom: 3px solid var(--primary);
+            padding-bottom: 0.5rem;
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text);
+            margin: 2rem 0 1rem;
+            padding-left: 0.75rem;
+            border-left: 4px solid var(--primary);
+        }
+        h3 {
+            font-size: 1.2rem;
+            color: var(--primary);
+            margin: 1.5rem 0 0.75rem;
+        }
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            border: 1px solid var(--border);
+        }
+        .card.highlight {
+            border-left: 4px solid var(--primary);
+        }
+        .card.recommended {
+            border: 2px solid var(--success);
+            background: #f0fdf4;
+        }
+        .tag {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 0.5rem;
+        }
+        .tag-easy { background: #dcfce7; color: #166534; }
+        .tag-medium { background: #fef9c3; color: #854d0e; }
+        .tag-hard { background: #fee2e2; color: #991b1b; }
+        .tag-rec { background: var(--primary); color: white; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #f1f5f9;
+            font-weight: 600;
+            color: var(--text);
+        }
+        tr:hover { background: #f8fafc; }
+        .pros-cons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin: 0.75rem 0;
+        }
+        .pros, .cons {
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+        .pros { background: #f0fdf4; border: 1px solid #bbf7d0; }
+        .cons { background: #fef2f2; border: 1px solid #fecaca; }
+        .pros::before { content: "✅ 优点："; font-weight: 600; }
+        .cons::before { content: "❌ 缺点："; font-weight: 600; }
+        code {
+            background: #f1f5f9;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-family: "Cascadia Code", "Fira Code", monospace;
+        }
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            margin: 0.75rem 0;
+        }
+        pre code { background: none; color: inherit; padding: 0; }
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        .scenario {
+            background: #f8fafc;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .scenario-title {
+            font-weight: 600;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        .flow-diagram {
+            background: #f1f5f9;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            white-space: pre;
+            overflow-x: auto;
+            margin: 1rem 0;
+            line-height: 1.5;
+        }
+        .metric {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.2rem 0.5rem;
+            background: #f1f5f9;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            margin: 0.2rem;
+        }
+        .section-divider {
+            border: none;
+            border-top: 2px dashed var(--border);
+            margin: 2.5rem 0;
+        }
+        ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; }
+        li { margin: 0.3rem 0; }
+        .toc {
+            background: #f8fafc;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+        .toc-title { font-weight: 600; margin-bottom: 0.75rem; }
+        .toc a { color: var(--primary); text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+        @media print {
+            body { padding: 1rem; }
+            .card { break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+
+<h1>🧚 流萤 AI 记忆功能技术方案研究报告</h1>
+<p class="subtitle">研究目标：使 AI 在聊天交互中能够访问和利用记忆功能中的内容｜2026-09-11</p>
+
+<div class="toc">
+    <div class="toc-title">📑 目录</div>
+    <ol>
+        <li><a href="#current">当前系统分析</a></li>
+        <li><a href="#architecture">记忆架构全景（业界 2026 最佳实践）</a></li>
+        <li><a href="#plan-a">方案 A：增强型关键词检索（渐进改良）</a></li>
+        <li><a href="#plan-b">方案 B：本地向量检索（RAG）</a></li>
+        <li><a href="#plan-c">方案 C：知识图谱 + 向量混合</a></li>
+        <li><a href="#plan-d">方案 D：三层混合记忆架构（推荐）</a></li>
+        <li><a href="#compare">方案对比总表</a></li>
+        <li><a href="#roadmap">实施路线图</a></li>
+    </ol>
+</div>
+
+<!-- ===== 第1章 ===== -->
+<h2 id="current">一、当前系统分析</h2>
+
+<div class="card highlight">
+<h3>现有架构</h3>
+<p>流萤当前的记忆系统基于 <code>core/memory.py</code>，核心能力：</p>
+<table>
+    <tr><th>能力</th><th>实现方式</th><th>状态</th></tr>
+    <tr><td>持久化存储</td><td>SQLite（messages 表）</td><td>✅ 已实现</td></tr>
+    <tr><td>全文检索</td><td>FTS5 trigram 分词</td><td>✅ 已实现（降级为 LIKE）</td></tr>
+    <tr><td>记忆分类</td><td>对话/笔记/待办/备忘</td><td>✅ 已实现</td></tr>
+    <tr><td>重要度评分</td><td>0-10 整数</td><td>✅ 已实现</td></tr>
+    <tr><td>记忆关联</td><td>related_ids JSON 数组</td><td>✅ 已实现</td></tr>
+    <tr><td>语义检索</td><td>向量嵌入 + 相似度搜索</td><td>❌ 未实现</td></tr>
+    <tr><td>记忆摘要/压缩</td><td>自动总结长对话</td><td>❌ 未实现</td></tr>
+    <tr><td>实体/关系抽取</td><td>知识图谱</td><td>❌ 未实现</td></tr>
+    <tr><td>自适应记忆管理</td><td>自动遗忘/巩固</td><td>❌ 未实现</td></tr>
+</table>
+
+<h3>当前记忆召回流程</h3>
+<div class="flow-diagram">用户输入 → memory.build_recall_block(query, top_k=5)
+                    ↓
+              FTS5 / LIKE 关键词匹配
+                    ↓
+          返回最近 5 条匹配记录（时间倒序）
+                    ↓
+      拼入 System Prompt: "【你记得的与当前话题相关的往事】"
+                    ↓
+              LLM 生成回复</div>
+
+<p><strong>核心瓶颈</strong>：当前依赖纯关键词匹配，无法处理语义相关但关键词不同的查询。例如用户说"上次讨论的那个方案"，系统无法找到相关记忆。</p>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 第2章 ===== -->
+<h2 id="architecture">二、记忆架构全景（业界 2026 最佳实践）</h2>
+
+<div class="card">
+<p>2026 年生产级 AI 记忆系统通常采用<strong>五层记忆架构</strong>：</p>
+<table>
+    <tr><th>层级</th><th>名称</th><th>存储</th><th>生命周期</th><th>延迟要求</th></tr>
+    <tr><td>1</td><td>工作记忆</td><td>进程内状态</td><td>当前轮次</td><td>&lt;1ms</td></tr>
+    <tr><td>2</td><td>短期记忆</td><td>最近 N 轮对话</td><td>当前会话</td><td>&lt;10ms</td></tr>
+    <tr><td>3</td><td>长期记忆</td><td>结构化数据库</td><td>跨会话永久</td><td>&lt;50ms</td></tr>
+    <tr><td>4</td><td>语义记忆</td><td>向量数据库 + BM25</td><td>跨会话永久</td><td>&lt;200ms</td></tr>
+    <tr><td>5</td><td>情景记忆</td><td>会话日志 + 向量索引</td><td>跨会话永久</td><td>&lt;500ms</td></tr>
+</table>
+<p style="margin-top:0.75rem;color:var(--text-secondary)">流萤当前覆盖了第 1-3 层（部分），缺失第 4-5 层。以下方案聚焦于补齐语义记忆和情景记忆能力。</p>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 方案 A ===== -->
+<h2 id="plan-a">三、方案 A：增强型关键词检索（渐进改良）</h2>
+
+<div class="card">
+<span class="tag tag-easy">难度：低</span>
+<span class="tag">周期：1-2 天</span>
+
+<h3>核心思路</h3>
+<p>不引入新依赖，在现有 SQLite + FTS5 基础上增强检索质量。</p>
+
+<h3>技术架构</h3>
+<div class="flow-diagram">用户输入
+    ↓
+┌─────────────────────────────┐
+│  查询预处理（Query Rewrite）  │
+│  · 去除停用词               │
+│  · 同义词扩展               │
+│  · 提取关键实体              │
+└─────────┬───────────────────┘
+          ↓
+┌─────────────────────────────┐
+│  多路召回（Hybrid Recall）    │
+│  ① FTS5 trigram 全文匹配     │
+│  ② LIKE 模糊匹配            │
+│  ③ 按分类/标签过滤           │
+│  ④ 按重要度排序              │
+└─────────┬───────────────────┘
+          ↓
+┌─────────────────────────────┐
+│  结果融合 + 去重 + 重排序     │
+│  · BM25 得分加权             │
+│  · 时间衰减因子              │
+│  · 重要度加权                │
+└─────────┬───────────────────┘
+          ↓
+    注入 System Prompt</div>
+
+<h3>实现步骤</h3>
+<ol>
+    <li><strong>查询改写模块</strong>：用 LLM 或规则将口语化查询转为检索友好格式
+        <pre><code>def rewrite_query(raw: str) -> str:
+    """规则 + 简单 NLP 改写查询"""
+    # 去除口语填充词
+    # 提取核心关键词
+    # 同义词扩展（本地词典）</code></pre>
+    </li>
+    <li><strong>多路召回融合</strong>：同时执行 FTS + LIKE + 分类过滤，按分数融合</li>
+    <li><strong>时间衰减</strong>：近期记忆权重更高，但重要记忆不受影响
+        <pre><code>def recency_boost(ts: int, half_life_days=30) -> float:
+    age_days = (time.time() - ts) / 86400
+    return 2 ** (-age_days / half_life_days)</code></pre>
+    </li>
+    <li><strong>自动摘要</strong>：长对话自动压缩，保留关键信息</li>
+</ol>
+
+<div class="pros-cons">
+    <div class="pros">
+        <ul>
+            <li>零新依赖，纯 Python + SQLite</li>
+            <li>打包体积不变，无额外运行时开销</li>
+            <li>实现简单，1-2 天可完成</li>
+            <li>与现有架构完全兼容</li>
+        </ul>
+    </div>
+    <div class="cons">
+        <ul>
+            <li>无法处理真正的语义搜索（同义词/近义词）</li>
+            <li>中文分词质量受限于 FTS5 trigram</li>
+            <li>记忆量大时召回精度下降</li>
+            <li>无法发现隐含的关联记忆</li>
+        </ul>
+    </div>
+</div>
+
+<div class="scenario">
+    <div class="scenario-title">适用场景</div>
+    <p>记忆量 < 5000 条、用户不追求"语义理解"、优先稳定性和打包体积的场景。</p>
+</div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 方案 B ===== -->
+<h2 id="plan-b">四、方案 B：本地向量检索（RAG）</h2>
+
+<div class="card">
+<span class="tag tag-medium">难度：中</span>
+<span class="tag">周期：3-5 天</span>
+
+<h3>核心思路</h3>
+<p>引入 Embedding 模型 + 向量存储，实现语义级别记忆检索。核心参考：<strong>OpenClaw 的本地 SQLite + sqlite-vec 架构</strong>。</p>
+
+<h3>技术架构</h3>
+<div class="flow-diagram">对话存储
+    ↓
+┌─────────────────────────────┐
+│  消息写入 messages 表         │
+│  同时调用 Embedding 模型       │
+│  生成向量 → chunks_vec 表     │
+└─────────────────────────────┘
+
+用户查询
+    ↓
+┌─────────────────────────────┐
+│  查询向量化                   │
+│  调用同一 Embedding 模型       │
+└─────────┬───────────────────┘
+          ↓
+┌─────────────────────────────┐
+│  向量相似度搜索               │
+│  SQLite + sqlite-vec 扩展     │
+│  或纯 Python 余弦相似度兜底    │
+└─────────┬───────────────────┘
+          ↓
+    Top-K 相关记忆 → 注入 Prompt</div>
+
+<h3>Embedding 模型选型</h3>
+<table>
+    <tr><th>模型</th><th>维度</th><th>中文</th><th>部署方式</th><th>打包体积增加</th></tr>
+    <tr><td><strong>m3e-base（推荐）</strong></td><td>768</td><td>✅ 专项优化</td><td>ONNX 本地推理</td><td>~400MB</td></tr>
+    <tr><td>BGE-small-zh</td><td>512</td><td>✅</td><td>ONNX 本地推理</td><td>~200MB</td></tr>
+    <tr><td>nomic-embed-text</td><td>768</td><td>⚠️ 一般</td><td>ONNX 本地推理</td><td>~300MB</td></tr>
+    <tr><td>text-embedding-3-small</td><td>1536</td><td>✅</td><td>OpenAI API</td><td>~0MB（需联网）</td></tr>
+</table>
+
+<h3>实现步骤</h3>
+<ol>
+    <li><strong>安装依赖</strong>：
+        <pre><code>pip install sentence-transformers onnxruntime  # 本地推理
+# 或
+pip install openai  # API 方式</code></pre>
+    </li>
+    <li><strong>扩展 SQLite Schema</strong>：
+        <pre><code>-- 新增向量存储表
+CREATE TABLE IF NOT EXISTS chunks_vec (
+    id INTEGER PRIMARY KEY,
+    embedding BLOB NOT NULL,  -- float32 二进制向量
+    model TEXT NOT NULL
+);
+
+-- 或使用 sqlite-vec 扩展（更高效）
+-- CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[768]);</code></pre>
+    </li>
+    <li><strong>向量化写入</strong>：每次 add() 消息时，同时生成 embedding 存入 chunks_vec</li>
+    <li><strong>向量搜索</strong>：
+        <pre><code>def vector_search(query: str, top_k: int = 5) -> list[dict]:
+    # 1. 查询向量化
+    q_vec = embed(query)
+    # 2. 加载所有向量（小规模）或用 sqlite-vec 加速
+    # 3. 计算余弦相似度
+    # 4. 返回 Top-K
+    results = []
+    for row in db.execute("SELECT id, embedding FROM chunks_vec"):
+        sim = cosine_similarity(q_vec, deserialize(row['embedding']))
+        results.append((row['id'], sim))
+    results.sort(key=lambda x: -x[1])
+    return results[:top_k]</code></pre>
+    </li>
+    <li><strong>混合检索</strong>：向量搜索 + FTS5 关键词搜索结果融合</li>
+    <li><strong>优雅降级</strong>：sqlite-vec 不可用时回退到纯 Python 余弦计算</li>
+</ol>
+
+<div class="pros-cons">
+    <div class="pros">
+        <ul>
+            <li>真正的语义搜索，"同义词/近义词"也能命中</li>
+            <li>本地运行，数据完全隐私</li>
+            <li>与现有 SQLite 架构天然兼容</li>
+            <li>OpenClaw 已验证此架构在桌面端可行</li>
+        </ul>
+    </div>
+    <div class="cons">
+        <ul>
+            <li>打包体积增加 200-400MB（Embedding 模型）</li>
+            <li>首次推理较慢（模型加载 ~2-5 秒）</li>
+            <li>查询延迟增加 50-200ms</li>
+            <li>需要处理 sqlite-vec 跨平台兼容性</li>
+        </ul>
+    </div>
+</div>
+
+<div class="scenario">
+    <div class="scenario-title">适用场景</div>
+    <p>追求语义理解能力、用户记忆量较大（5000+）、可接受打包体积增加的场景。这是<strong>性价比最高的方案</strong>。</p>
+</div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 方案 C ===== -->
+<h2 id="plan-c">五、方案 C：知识图谱 + 向量混合</h2>
+
+<div class="card">
+<span class="tag tag-hard">难度：高</span>
+<span class="tag">周期：7-10 天</span>
+
+<h3>核心思路</h3>
+<p>在向量检索基础上，增加<strong>实体-关系图谱</strong>，支持关系推理。参考"Building a Local-First Memory Layer for AI Agents"的 SQLite + 内存图架构。</p>
+
+<h3>技术架构</h3>
+<div class="flow-diagram">对话存储
+    ↓
+┌─────────────────────────────┐
+│  消息写入 messages 表         │
+│  ↓                          │
+│  LLM 实体/关系抽取            │
+│  · entities 表               │
+│  · relations 表（S-P-O 三元组）│
+│  ↓                          │
+│  向量嵌入 → chunks_vec 表    │
+└─────────────────────────────┘
+
+用户查询
+    ↓
+┌─────────────────────────────┐
+│  双路召回                    │
+│  ① 向量语义搜索 → 候选记忆    │
+│  ② 提取查询中的实体           │
+│     → 图谱 BFS/DFS 遍历      │
+│     → 获取关联实体和关系       │
+└─────────┬───────────────────┘
+          ↓
+┌─────────────────────────────┐
+│  结果融合                    │
+│  · 向量得分 + 图谱关联度      │
+│  · 结构化上下文组装           │
+└─────────┬───────────────────┘
+          ↓
+    注入 System Prompt</div>
+
+<h3>数据模型</h3>
+<pre><code>-- 实体表
+CREATE TABLE entities (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,        -- 实体名称（规范化）
+    type TEXT,                 -- 类型：人/项目/概念/事件...
+    properties TEXT,           -- JSON 属性
+    created_at INTEGER
+);
+
+-- 关系表（S-P-O 三元组）
+CREATE TABLE relations (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL,
+    predicate TEXT NOT NULL,   -- 关系类型
+    object_id INTEGER NOT NULL,
+    source_msg_id INTEGER,     -- 来源消息
+    confidence REAL DEFAULT 1.0,
+    UNIQUE(subject_id, predicate, object_id)
+);
+
+-- 内存图（启动时从 relations 构建）
+# Python dict: {entity_id: [(predicate, target_id), ...]}</code></pre>
+
+<h3>实现步骤</h3>
+<ol>
+    <li>在方案 B 基础上，增加实体/关系抽取（用 LLM 后处理每轮对话）</li>
+    <li>构建内存图（启动时从 SQLite 加载，增量更新）</li>
+    <li>查询时双路召回：向量搜索 + 图谱遍历</li>
+    <li>结果融合排序</li>
+</ol>
+
+<div class="pros-cons">
+    <div class="pros">
+        <ul>
+            <li>支持关系推理（"谁负责的项目"）</li>
+            <li>结构化知识，可解释性强</li>
+            <li>本地 SQLite 存储，零运维</li>
+        </ul>
+    </div>
+    <div class="cons">
+        <ul>
+            <li>实现复杂度高，需要 LLM 抽取实体/关系</li>
+            <li>每轮对话额外消耗 LLM token（抽取用）</li>
+            <li>实体对齐和冲突处理较难</li>
+            <li>打包体积增加最多</li>
+        </ul>
+    </div>
+</div>
+
+<div class="scenario">
+    <div class="scenario-title">适用场景</div>
+    <p>需要复杂关系推理（如项目管理、团队协作）、有明确实体-关系需求的场景。对个人助手来说可能过度设计。</p>
+</div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 方案 D ===== -->
+<h2 id="plan-d">六、方案 D：三层混合记忆架构（⭐ 推荐）</h2>
+
+<div class="card recommended">
+<span class="tag tag-rec">推荐方案</span>
+<span class="tag tag-medium">难度：中</span>
+<span class="tag">周期：5-7 天</span>
+
+<h3>核心思路</h3>
+<p>结合方案 A 和方案 B 的优点，采用<strong>三层混合架构</strong>：缓冲层（最近对话原文）+ 摘要层（会话压缩）+ 向量层（长期语义检索）。这是 2026 年生产级 AI 助手的<strong>最佳实践</strong>。</p>
+
+<h3>技术架构</h3>
+<div class="flow-diagram">┌─────────────────────────────────────────────────────┐
+│                  三层记忆架构                         │
+│                                                     │
+│  ┌─────────────────────────────────────────────┐   │
+│  │  Layer 1: 缓冲层（Buffer）                   │   │
+│  │  · 最近 8-10 轮对话原文                       │   │
+│  │  · 始终注入 System Prompt                    │   │
+│  │  · 无延迟，保证对话连贯性                      │   │
+│  └─────────────────────────────────────────────┘   │
+│                     ↓                              │
+│  ┌─────────────────────────────────────────────┐   │
+│  │  Layer 2: 摘要层（Summary）                  │   │
+│  │  · 当前会话的压缩摘要                         │   │
+│  │  · 每 10 轮自动触发 LLM 摘要                 │   │
+│  │  · 保留关键决策/偏好/上下文                    │   │
+│  └─────────────────────────────────────────────┘   │
+│                     ↓                              │
+│  ┌─────────────────────────────────────────────┐   │
+│  │  Layer 3: 语义层（Semantic）                 │   │
+│  │  · 全量历史对话的向量索引                      │   │
+│  │  · 用户最新输入触发语义检索                    │   │
+│  │  · 返回 Top-5 相关历史片段                    │   │
+│  │  · 混合检索：向量 + FTS5 + 重要度             │   │
+│  └─────────────────────────────────────────────┘   │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+
+用户新输入
+    ↓
+┌─────────────────────────────────────────────────┐
+│  上下文组装（Context Assembly）                   │
+│                                                 │
+│  System Prompt =                                │
+│    [人设]                                        │
+│    + [Layer 1: 最近 8 轮原文]                     │
+│    + [Layer 2: 会话摘要]                          │
+│    + [Layer 3: 语义检索结果 Top-5]                │
+│    + [用户输入]                                   │
+│                                                 │
+│  → 发送给 LLM 生成回复                           │
+└─────────────────────────────────────────────────┘</div>
+
+<h3>实现步骤</h3>
+
+<h3>Step 1：扩展 memory.py — 增加向量存储</h3>
+<pre><code>class Memory:
+    def __init__(self, db_path: str):
+        # ... 现有代码 ...
+        self._init_vec_tables()  # 新增
+
+    def _init_vec_tables(self):
+        """初始化向量存储表"""
+        cur = self.conn.cursor()
+        # 向量索引表（sqlite-vec 或兜底方案）
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vec_memories (
+                id INTEGER PRIMARY KEY,
+                embedding BLOB,
+                model TEXT DEFAULT 'm3e-base'
+            )
+        """)
+        self.conn.commit()
+
+    def add_with_embedding(self, session_id, role, content, **kwargs):
+        """写入消息 + 同时生成向量"""
+        msg_id = self.add(session_id, role, content, **kwargs)
+        # 异步生成 embedding（不阻塞主流程）
+        embedding = self._embed(content)
+        if embedding:
+            self._store_embedding(msg_id, embedding)
+        return msg_id
+
+    def semantic_search(self, query: str, top_k: int = 5) -> list[dict]:
+        """语义检索：向量相似度 + FTS5 混合"""
+        q_vec = self._embed(query)
+        # 1. 向量搜索
+        vec_results = self._vector_search(q_vec, top_k * 2)
+        # 2. FTS5 关键词搜索
+        fts_results = self.search(query, top_k * 2)
+        # 3. 融合去重排序
+        return self._merge_results(vec_results, fts_results, top_k)
+
+    def get_recent_context(self, session_id, n=8) -> str:
+        """获取最近 N 轮对话原文"""
+        recent = self.recent(session_id, limit=n)
+        return "\n".join(f"{'用户' if r['role']=='user' else 'Fairy'}: {r['content']}"
+                        for r in recent)</code></pre>
+
+<h3>Step 2：新增自动摘要模块</h3>
+<pre><code>class SessionSummarizer:
+    """会话摘要器：每 N 轮自动压缩对话历史"""
+
+    def __init__(self, llm, interval: int = 10):
+        self.llm = llm
+        self.interval = interval
+        self.turn_count = 0
+        self.summary = ""
+
+    def maybe_summarize(self, messages: list[dict]) -> str:
+        self.turn_count += 1
+        if self.turn_count % self.interval == 0:
+            self.summary = self._do_summarize(messages)
+        return self.summary
+
+    def _do_summarize(self, messages: list[dict]) -> str:
+        prompt = "请将以下对话压缩为一段简洁摘要，保留关键决策和信息：\n\n"
+        prompt += "\n".join(f"{m['role']}: {m['content']}" for m in messages[-20:])
+        return self.llm.chat([{"role": "user", "content": prompt}])</code></pre>
+
+<h3>Step 3：修改 Fairy.respond() — 集成三层记忆</h3>
+<pre><code>def respond(self, user_text: str) -> str:
+    self._set_state("thinking")
+    try:
+        self.memory.add(self.session_id, "user", user_text)
+
+        # === 三层记忆组装 ===
+
+        # Layer 1: 缓冲层（最近 8 轮原文）
+        buffer_ctx = self.memory.get_recent_context(self.session_id, n=8)
+
+        # Layer 2: 摘要层
+        summary_ctx = self.summarizer.maybe_summarize(
+            self.memory.recent(self.session_id, limit=20)
+        )
+
+        # Layer 3: 语义层（跨会话长期记忆）
+        semantic_hits = self.memory.semantic_search(user_text, top_k=5)
+        semantic_ctx = self._format_recall(semantic_hits)
+
+        # 组装 System Prompt
+        self.llm.system_prompt = self._build_prompt(
+            buffer_ctx, summary_ctx, semantic_ctx
+        )
+
+        # ... 正常对话流程 ...
+        reply = self.llm.chat(messages)
+        return reply
+    finally:
+        self._set_state("idle")</code></pre>
+
+<h3>Step 4：Embedding 模型集成</h3>
+<pre><code>class LocalEmbedder:
+    """本地 Embedding 模型（ONNX 推理）"""
+
+    def __init__(self, model_path: str = "models/m3e-base"):
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(model_path)
+            self._available = True
+        except ImportError:
+            self._available = False
+            print("⚠️ sentence-transformers 未安装，语义检索降级为关键词模式")
+
+    def embed(self, text: str) -> list[float] | None:
+        if not self._available:
+            return None
+        return self.model.encode(text).tolist()
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not self._available:
+            return []
+        return self.model.encode(texts).tolist()</code></pre>
+
+<h3>关键设计决策</h3>
+<table>
+    <tr><th>决策点</th><th>选择</th><th>理由</th></tr>
+    <tr><td>Embedding 模型</td><td>m3e-base（本地）</td><td>中文效果好，ONNX 可打包，无网络依赖</td></tr>
+    <tr><td>向量存储</td><td>SQLite BLOB + 纯 Python 相似度</td><td>零额外依赖，小规模（<10万条）性能足够</td></tr>
+    <tr><td>混合策略</td><td>向量 70% + FTS5 30% 加权</td><td>语义为主，关键词兜底</td></tr>
+    <tr><td>摘要触发</td><td>每 10 轮自动触发</td><td>平衡压缩率和信息损失</td></tr>
+    <tr><td>降级策略</td><td>向量不可用时纯 FTS5</td><td>保证任何环境都能工作</td></tr>
+</table>
+
+<div class="pros-cons">
+    <div class="pros">
+        <ul>
+            <li>三层互补：连贯性 + 压缩 + 语义搜索全覆盖</li>
+            <li>优雅降级：向量不可用时自动退化为关键词模式</li>
+            <li>本地运行：数据完全隐私，无外部依赖</li>
+            <li>渐进实现：可先做 Layer 1+2，再加 Layer 3</li>
+            <li>参考了 OpenClaw、Mem0 等成熟项目的架构</li>
+        </ul>
+    </div>
+    <div class="cons">
+        <ul>
+            <li>打包体积增加 200-400MB（Embedding 模型）</li>
+            <li>实现周期 5-7 天</li>
+            <li>摘要质量依赖 LLM 能力</li>
+            <li>需要处理 embedding 缓存避免重复计算</li>
+        </ul>
+    </div>
+</div>
+
+<div class="scenario">
+    <div class="scenario-title">适用场景（强烈推荐）</div>
+    <p>这是流萤项目的<strong>最佳方案</strong>。它在复杂度和效果之间取得了完美平衡，且与现有 SQLite 架构天然兼容。建议分两期实施：一期做 Layer 1+2（摘要 + 缓冲），二期加 Layer 3（向量检索）。</p>
+</div>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 对比总表 ===== -->
+<h2 id="compare">七、方案对比总表</h2>
+
+<div class="card">
+<table>
+    <tr>
+        <th>维度</th>
+        <th>A: 增强关键词</th>
+        <th>B: 本地向量</th>
+        <th>C: 知识图谱</th>
+        <th>D: 三层混合 ⭐</th>
+    </tr>
+    <tr><td><strong>语义搜索</strong></td><td>❌ 无</td><td>✅ 有</td><td>✅ 有</td><td>✅ 有</td></tr>
+    <tr><td><strong>关系推理</strong></td><td>❌ 无</td><td>❌ 无</td><td>✅ 有</td><td>⚠️ 基础</td></tr>
+    <tr><td><strong>打包体积增加</strong></td><td>0 MB</td><td>~300 MB</td><td>~400 MB</td><td>~300 MB</td></tr>
+    <tr><td><strong>实现难度</strong></td><td>⭐ 低</td><td>⭐⭐ 中</td><td>⭐⭐⭐ 高</td><td>⭐⭐ 中</td></tr>
+    <tr><td><strong>实现周期</strong></td><td>1-2 天</td><td>3-5 天</td><td>7-10 天</td><td>5-7 天</td></tr>
+    <tr><td><strong>运行时开销</strong></td><td>~0ms</td><td>50-200ms</td><td>100-300ms</td><td>50-200ms</td></tr>
+    <tr><td><strong>优雅降级</strong></td><td>N/A</td><td>✅ FTS5 兜底</td><td>⚠️ 复杂</td><td>✅ 多级降级</td></tr>
+    <tr><td><strong>数据隐私</strong></td><td>✅ 纯本地</td><td>✅ 纯本地</td><td>✅ 纯本地</td><td>✅ 纯本地</td></tr>
+    <tr><td><strong>适合场景</strong></td><td>轻量/小记忆</td><td>语义需求强</td><td>关系推理需求</td><td>综合最优</td></tr>
+</table>
+</div>
+
+<hr class="section-divider">
+
+<!-- ===== 路线图 ===== -->
+<h2 id="roadmap">八、实施路线图（推荐方案 D）</h2>
+
+<div class="card">
+<h3>第一期（1-2 天）：缓冲 + 摘要</h3>
+<ul>
+    <li>✅ 修改 <code>Fairy.respond()</code>，将最近 8 轮原文注入 Prompt</li>
+    <li>✅ 实现 <code>SessionSummarizer</code>，每 10 轮自动压缩</li>
+    <li>✅ 优化 <code>build_recall_block()</code> 的融合排序算法</li>
+    <li>✅ 添加时间衰减和重要度加权</li>
+</ul>
+
+<h3>第二期（3-5 天）：向量语义检索</h3>
+<ul>
+    <li>集成 m3e-base ONNX 模型（本地推理）</li>
+    <li>扩展 SQLite Schema 增加 vec_memories 表</li>
+    <li>实现 <code>LocalEmbedder</code> 和 <code>semantic_search()</code></li>
+    <li>实现向量 + FTS5 混合检索 + 降级策略</li>
+    <li>添加 embedding 缓存避免重复计算</li>
+</ul>
+
+<h3>第三期（可选）：高级特性</h3>
+<ul>
+    <li>自动记忆管理（重要度自动评估、过期清理）</li>
+    <li>记忆巩固（空闲期自动总结/关联）</li>
+    <li>用户显式标记重要记忆</li>
+</ul>
+
+<h3>性能目标</h3>
+<div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem;">
+    <span class="metric">🎯 语义搜索命中率 > 80%</span>
+    <span class="metric">⚡ 查询延迟 < 200ms</span>
+    <span class="metric">📦 打包体积增加 < 400MB</span>
+    <span class="metric">🔄 优雅降级 100%</span>
+    <span class="metric">🔒 数据零外泄</span>
+</div>
+</div>
+
+<hr class="section-divider">
+
+<div class="card" style="text-align: center; background: linear-gradient(135deg, #f0f9ff, #ede9fe);">
+    <h3 style="color: var(--primary); margin-bottom: 0.5rem;">📌 总结建议</h3>
+    <p style="font-size: 1.1rem; max-width: 700px; margin: 0 auto;">
+        对于流萤项目，<strong>方案 D（三层混合记忆架构）</strong>是最佳选择。
+        它在搜索质量、实现复杂度、打包体积之间取得了完美平衡，
+        且与现有 SQLite 架构天然兼容。建议分两期实施，先做摘要层，再加向量层。
+    </p>
+</div>
+
+</body>
+</html>
