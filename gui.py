@@ -197,6 +197,12 @@ class ChatWorker(threading.Thread):
                         note = "情绪已手动微调（对话立即生效）"
                     self._push_emotion(reload_from_db=False)
                     self.ui.put(("status", note))
+                elif kind == "context":
+                    # 只看不发：不主动创建 Fairy（免得"还没聊过"就白开一个会话）
+                    if self.fairy is None:
+                        self.ui.put(("context", {"empty": True}))
+                    else:
+                        self.ui.put(("context", dict(self.fairy.last_context or {})))
                 elif kind == "chat":
                     _, text, speak = job
                     self._ensure_fairy(load_config())
@@ -422,6 +428,8 @@ class ConsoleApp:
         self.btn_voice.pack(side="right")
         self.btn_clear = ttk.Button(row, text="清空显示", command=self._clear_chat)
         self.btn_clear.pack(side="right", padx=(0, 8))
+        self.btn_ctx = ttk.Button(row, text="🔍 本轮上下文", command=self._show_context_click)
+        self.btn_ctx.pack(side="right", padx=(0, 8))
 
         row2 = ttk.Frame(f)
         row2.pack(fill="x", padx=8, pady=(2, 8))
@@ -469,6 +477,62 @@ class ConsoleApp:
         state = "disabled" if busy else "normal"
         self.btn_send.configure(state=state)
         self.btn_voice.configure(state=state)
+
+    def _show_context_click(self) -> None:
+        """「🔍 本轮上下文」：向后台要一份上一轮真正发出去的上下文快照（P2-8）。"""
+        self.worker.submit("context")
+
+    def _show_context(self, payload: dict | None) -> None:
+        """把上下文快照摊开给用户看——这是"情感/记忆到底注没注入"的唯一硬证据。"""
+        payload = payload or {}
+        if payload.get("empty") or not payload.get("blocks"):
+            messagebox.showinfo("本轮上下文", "还没有进行过对话。\n"
+                                              "先在下面发一句，回来再点这里，就能看到"
+                                              "实际发给大模型的人设 / 往事 / 心情 / 对话历史。")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("本轮上下文（实际发给大模型的内容）")
+        win.geometry("760x620")
+        box = ScrolledText(win, font=FONT_SMALL, wrap="word", state="normal")
+        box.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def add(text: str, tag: str = "") -> None:
+            box.insert("end", text, tag)
+
+        box.tag_configure("h", foreground="#1f7a3d", font=FONT_BOLD)
+        box.tag_configure("dim", foreground="#8a8f98")
+        box.tag_configure("on", foreground="#2b5fb8")
+        box.tag_configure("off", foreground="#b23b3b")
+
+        add(f"模型 {payload.get('model', '?')}｜温度 {payload.get('temperature', '?')}"
+            f"｜估算约 {payload.get('est_tokens', 0)} tokens"
+            f"（system {payload.get('system_chars', 0)} 字 / "
+            f"{payload.get('system_tokens', 0)} tokens + "
+            f"历史 {payload.get('history_turns', 0)} 条 / "
+            f"{payload.get('history_tokens', 0)} tokens）\n", "dim")
+        add(f"召回条数上限 recall_top_k={payload.get('recall_top_k', '?')}"
+            f"｜携带轮数 max_history_turns={payload.get('max_history_turns', '?')}"
+            f"｜记忆库共 {payload.get('memory_total', 0)} 条\n", "dim")
+        add("情绪注入上下文：")
+        add("已开启 ✓\n" if payload.get("emotion_injected") else "未注入 ✗\n",
+            "on" if payload.get("emotion_injected") else "off")
+        add("往事召回：")
+        add("本轮有命中 ✓\n" if payload.get("recall_injected") else "本轮无命中（可能未达门槛）\n",
+            "on" if payload.get("recall_injected") else "off")
+        add("（情绪/往事任一项没出现，就去「配置」页对应分组找开关："
+            "「把『此刻心情』注入大模型」/「重要记忆常驻注入」）\n\n", "dim")
+
+        for blk in payload.get("blocks", []):
+            add(f"【{blk.get('title')}】{blk.get('chars', 0)} 字\n", "h")
+            add((blk.get("text") or "") + "\n\n")
+
+        add(f"【近 {payload.get('history_turns', 0)} 轮对话】\n", "h")
+        for m in payload.get("history", []) or []:
+            who = "你" if m.get("role") == "user" else "Fairy"
+            add(f"  {who}：{m.get('content', '')}\n")
+        box.configure(state="disabled")
+        box.yview_moveto(0)
 
     # ============ ② 记忆 ============
     def _build_memory_tab(self) -> None:
@@ -793,8 +857,13 @@ class ConsoleApp:
 
         ttk.Label(f, text="将发给 MiMo-TTS 的风格指令（按官方规范放 role=user，可编辑后复制）",
                   font=FONT_BOLD).pack(anchor="w", padx=10, pady=(6, 2))
-        self.emo_style_box = ScrolledText(f, height=9, font=FONT, wrap="word")
+        self.emo_style_box = ScrolledText(f, height=7, font=FONT, wrap="word")
         self.emo_style_box.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        ttk.Label(f, text="将注入大模型上下文的心情（决定它「说什么」，与上面管「怎么念」是两件事）",
+                  font=FONT_BOLD).pack(anchor="w", padx=10, pady=(2, 2))
+        self.emo_ctx_box = ScrolledText(f, height=4, font=FONT, wrap="word")
+        self.emo_ctx_box.pack(fill="both", expand=True, padx=10, pady=(0, 6))
 
         ttk.Label(f, text="情绪变化（蓝＝愉悦度，绿＝唤醒度）", font=FONT_SMALL,
                   foreground="#8a8f98").pack(anchor="w", padx=10)
@@ -868,6 +937,9 @@ class ConsoleApp:
         self._draw_bar(c, 80, "亲密度", float(s.get("intimacy", 0.0)), 0.0, 1.0, "#BA7517", "{:.2f}")
         self.emo_style_box.delete("1.0", "end")
         self.emo_style_box.insert("1.0", s.get("style_preview", ""))
+        self.emo_ctx_box.delete("1.0", "end")
+        self.emo_ctx_box.insert("1.0", s.get("context_preview")
+                                or "（已关闭「把此刻心情注入大模型」，情绪只影响语音语气）")
         self._draw_emotion_history(payload.get("history") or [])
 
     def _reset_emotion(self) -> None:
@@ -1063,6 +1135,51 @@ class ConsoleApp:
         ttk.Label(petrow3, text="重启只临时生效；点「保存配置」才会写入 config.json",
                   font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=4)
 
+        # ---------- 记忆与上下文注入 ----------
+        ttk.Label(wrap, text="记忆与上下文注入（每轮实际发给大模型多少东西）", font=FONT_BOLD).grid(
+            row=next_row(), column=0, columnspan=3, sticky="w", pady=(12, 2))
+        m_cfg = self.cfg.get("memory", {}) or {}
+
+        mrow1 = ttk.Frame(wrap)
+        mrow1.grid(row=next_row(), column=0, columnspan=3, sticky="we")
+        ttk.Label(mrow1, text="每轮召回往事", font=FONT).pack(side="left")
+        self.recall_k_var = tk.StringVar(value=str(m_cfg.get("recall_top_k", 5)))
+        ttk.Spinbox(mrow1, from_=1, to=15, width=4,
+                    textvariable=self.recall_k_var).pack(side="left", padx=(2, 4))
+        ttk.Label(mrow1, text="条", font=FONT).pack(side="left")
+        ttk.Label(mrow1, text="（1~15，越大记得越多但更费 token）", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=(2, 14))
+        ttk.Label(mrow1, text="携带对话轮数", font=FONT).pack(side="left")
+        self.hist_turns_var = tk.StringVar(
+            value=str((self.cfg.get("llm", {}) or {}).get("max_history_turns", 20)))
+        ttk.Spinbox(mrow1, from_=5, to=50, width=4,
+                    textvariable=self.hist_turns_var).pack(side="left", padx=(2, 4))
+        ttk.Label(mrow1, text="（5~50，越大越能接上文）", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=2)
+
+        mrow2 = ttk.Frame(wrap)
+        mrow2.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(2, 3))
+        self.pin_var = tk.BooleanVar(value=bool(m_cfg.get("pin_important", True)))
+        ttk.Checkbutton(mrow2, text="重要记忆常驻注入",
+                        variable=self.pin_var).pack(side="left")
+        ttk.Label(mrow2, text="重要度 ≥", font=FONT).pack(side="left", padx=(4, 2))
+        self.pin_min_var = tk.StringVar(value=str(m_cfg.get("pin_min_importance", 8)))
+        ttk.Spinbox(mrow2, from_=0, to=10, width=4,
+                    textvariable=self.pin_min_var).pack(side="left")
+        ttk.Label(mrow2, text="分，最多", font=FONT).pack(side="left", padx=(4, 2))
+        self.pin_limit_var = tk.StringVar(value=str(m_cfg.get("pin_limit", 5)))
+        ttk.Spinbox(mrow2, from_=1, to=10, width=4,
+                    textvariable=self.pin_limit_var).pack(side="left")
+        ttk.Label(mrow2, text="条（不命中关键词也会带上）", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=4)
+
+        mrow3 = ttk.Frame(wrap)
+        mrow3.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(0, 3))
+        ttk.Label(mrow3, text="召回按「关键词相关度 + 重要度 + 分类」综合排序——"
+                              "所以记忆页里把某条调到高分、归成「待办/笔记」，"
+                              "真的会影响它出现在对话里的机会。改完点「保存配置」。",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left")
+
         # ---------- 情绪模型 ----------
         ttk.Label(wrap, text="情绪模型（程序化）", font=FONT_BOLD).grid(
             row=next_row(), column=0, columnspan=3, sticky="w", pady=(12, 2))
@@ -1098,6 +1215,14 @@ class ConsoleApp:
         ttk.Entry(erow2, textvariable=self.emo_decay_var, width=6).pack(side="left", padx=(2, 4))
         ttk.Label(erow2, text="0~1，越大越快平静", font=FONT_SMALL,
                   foreground="#8a8f98").pack(side="left")
+
+        erow3 = ttk.Frame(wrap)
+        erow3.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(0, 3))
+        self.emo_inject_var = tk.BooleanVar(value=bool(e_cfg.get("inject_to_context", True)))
+        ttk.Checkbutton(erow3, text="把「此刻心情」注入大模型（影响文字措辞）",
+                        variable=self.emo_inject_var).pack(side="left")
+        ttk.Label(erow3, text="关掉的话，情绪只改变语音语气，不影响它说什么",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
 
         # ---------- Pi 协作 ----------
         ttk.Label(wrap, text="Pi 协作（只在明确要求时调用外部 agent）", font=FONT_BOLD).grid(
@@ -1184,6 +1309,16 @@ class ConsoleApp:
                 bad.append(f"{field}（填的不是数字）")
             return val
 
+        def clamp_int(var, field: str, default: int, lo: int, hi: int) -> int:
+            """整数字段：非法回退原值，合法则钳制在 [lo, hi] 内。"""
+            ok, val = coerce_optional_int(var.get(), default)
+            if not ok:
+                bad.append(f"{field}（要填整数）")
+                return int(default)
+            if val is None:
+                return int(default)
+            return max(lo, min(hi, int(val)))
+
         thresh = num(self.thresh_var, "录音静音阈值", cur_audio.get("silence_threshold", 0.008))
         tail = num(self.tail_var, "说完停顿判定（秒）", cur_audio.get("tail_silence_seconds", 1.0))
         temp = num(self.temp_var, "性格随机度 temperature",
@@ -1196,6 +1331,15 @@ class ConsoleApp:
                          cfg_now.get("pi", {}).get("timeout", 600))
         pet_scale = num(self.pet_scale_var, "桌宠大小", cur_pet.get("scale", 1.0))
         pet_opacity = num(self.pet_opacity_var, "桌宠不透明度", cur_pet.get("opacity", 1.0))
+        cur_mem = cfg_now.get("memory", {}) or {}
+        recall_k = clamp_int(self.recall_k_var, "每轮召回往事条数",
+                             cur_mem.get("recall_top_k", 5), 1, 15)
+        hist_turns = clamp_int(self.hist_turns_var, "携带对话轮数",
+                               cfg_now.get("llm", {}).get("max_history_turns", 20), 5, 50)
+        pin_min = clamp_int(self.pin_min_var, "常驻记忆重要度门槛",
+                            cur_mem.get("pin_min_importance", 8), 0, 10)
+        pin_limit = clamp_int(self.pin_limit_var, "常驻记忆条数",
+                              cur_mem.get("pin_limit", 5), 1, 10)
 
         ok_x, pet_x = coerce_optional_int(self.pet_x_var.get(), cur_pet.get("start_x"))
         if not ok_x:
@@ -1217,6 +1361,7 @@ class ConsoleApp:
         raw["llm"]["model"] = self.model_var.get().strip()
         raw["llm"]["base_url"] = self.baseurl_var.get().strip()
         raw["llm"]["temperature"] = temp
+        raw["llm"]["max_history_turns"] = hist_turns
         raw.setdefault("tts", {})
         t = self._current_tts_settings()
         raw["tts"]["model"] = t["model"]
@@ -1229,6 +1374,12 @@ class ConsoleApp:
         raw["audio"]["silence_threshold"] = thresh
         raw["audio"]["tail_silence_seconds"] = tail
         raw["audio"]["barge_in"] = bool(self.barge_var.get())
+        # 记忆与上下文注入
+        raw.setdefault("memory", {})
+        raw["memory"]["recall_top_k"] = recall_k
+        raw["memory"]["pin_important"] = bool(self.pin_var.get())
+        raw["memory"]["pin_min_importance"] = pin_min
+        raw["memory"]["pin_limit"] = pin_limit
         raw.setdefault("pet", {})
         raw["pet"]["enabled"] = bool(self.pet_var.get())
         raw["pet"]["demo"] = bool(self.pet_demo_var.get())
@@ -1241,6 +1392,7 @@ class ConsoleApp:
         raw["emotion"]["enabled"] = bool(self.emo_enabled_var.get())
         raw["emotion"]["infer_with_llm"] = bool(self.emo_llm_var.get())
         raw["emotion"]["style_mode"] = self.emo_mode_var.get().strip() or "director"
+        raw["emotion"]["inject_to_context"] = bool(self.emo_inject_var.get())
         raw["emotion"]["decay_per_hour"] = emo_decay
         raw["emotion"].setdefault("baseline", {})
         raw["emotion"]["baseline"]["valence"] = emo_v
@@ -1622,6 +1774,8 @@ class ConsoleApp:
                 self._render_emotion(msg[1])
             elif kind == "emotion_error":
                 self._render_emotion(None, str(msg[1]))
+            elif kind == "context":
+                self._show_context(msg[1])
             elif kind == "chat_sys":
                 self._chat_append("sys", msg[1])
             elif kind == "status":

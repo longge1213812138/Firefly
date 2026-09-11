@@ -39,6 +39,23 @@ from core.tts import MiMoTTS, make_tts  # noqa: E402
 from core.wake import WakeListener  # noqa: E402
 
 
+def estimate_tokens(text: str) -> int:
+    """粗略估 token 数（只用于界面上给个量级，不追求精确）。
+
+    中日韩字符按「1 字 ≈ 1 token」估，其余字符按「4 字符 ≈ 1 token」估——
+    对本地自用的量级判断足够，不做 tokenizer 依赖。
+    """
+    cjk = 0
+    other = 0
+    for ch in (text or ""):
+        if ("\u4e00" <= ch <= "\u9fff" or "\u3040" <= ch <= "\u30ff"
+                or "\uac00" <= ch <= "\ud7af"):
+            cjk += 1
+        else:
+            other += 1
+    return int(cjk + other / 4.0 + 0.5)
+
+
 class _StreamSpeaker:
     """流式播报器：后台线程「按句合成 + 播放」，带 1 句前瞻以规避 ACTION 行。
 
@@ -139,6 +156,8 @@ class Fairy:
                         else EmotionModel(cfg, db_path=cfg["memory"]["db_path"]))
         self._owns_emotion = emotion is None  # 外部注入的实例由注入方负责关闭
         self._last_scene = ""          # 最近一轮的情境描述，给 TTS 导演模式用
+        self._context_head: list[tuple[str, str]] = []  # 上一轮 system prompt 的分块
+        self.last_context: dict = {}   # 上一轮实际发出去的上下文快照（控制台可视化用）
         self.stats = UsageStats(cfg.get("stats", {}).get("path", "data/stats.json"))
         self.stats.record_session()
         self.llm = llm_mod.make_llm(cfg, system_prompt=self.persona)
@@ -181,32 +200,108 @@ class Fairy:
         return f"{base}。\n此刻的语气与情绪（请务必照此演绎）：\n{emo}"
 
     # ---------- 核心对话 ----------
+    def _pre_emotion(self, user_text: str) -> None:
+        """P1-6：回复生成前先做一次关键词预判，让**本轮**语气就跟上来。
+
+        轮末仍会照常跑完整推断（可能用大模型精修），这里只是"先垫一步"，
+        解决"用户说很累、第一句回应却还是轻快"的慢一拍问题。
+        """
+        emo = self.emotion
+        if emo is None or not emo.enabled:
+            return
+        try:
+            emo.pre_turn_hint(user_text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _mood_context(self) -> str:
+        """把情绪翻译成给大模型看的「措辞级」状态行（P1-4）。
+
+        与 `_tts_instruction()` 的分工：
+        - `_tts_instruction()` 管**怎么念**（语速/气息/尾音），发给 TTS
+        - 本方法管**说什么**（措辞/态度），拼进 system prompt
+        没有这一步的话，情绪只影响语气、不影响措辞 → 人格不一致。
+        """
+        emo = self.emotion
+        if emo is None or not emo.enabled:
+            return ""
+        if not bool((self.cfg.get("emotion", {}) or {}).get("inject_to_context", True)):
+            return ""
+        try:
+            return emo.context_line() if emo.inject_to_context else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _system_prompt(self, recall: str) -> str:
+        mood = self._mood_context()
         parts = [self.persona, "", actions.DESCRIPTIONS]
+        blocks: list[tuple[str, str]] = [("人设", self.persona),
+                                         ("动作说明", actions.DESCRIPTIONS)]
         if recall:
             parts += ["", "【你记得的与当前话题相关的往事】", recall,
                       "（自然地运用这些记忆，不要生硬地复述，也不要说你查了数据库）"]
+            blocks.append(("往事召回", recall))
+        if mood:
+            parts += ["", mood]
+            blocks.append(("此刻心情", mood))
+        self._context_head = blocks   # 留给「本轮上下文」可视化（P2-8）
         return "\n".join(parts)
 
     def _prepare_messages(self, user_text: str) -> list[dict]:
-        """对话前的公共准备：载人设、召回往事、拼上下文，返回 messages。
+        """对话前的公共准备：载人设、预判情绪、召回往事、拼上下文，返回 messages。
 
-        顺序很重要：**先召回、再把用户这句话入库**。反过来做的话，刚写进去的这句话
-        会被自己的检索命中，在上下文的「往事」里重复出现一遍，挤占真实记忆的额度。
+        顺序很重要：
+        1. **先召回、再把用户这句话入库**——反过来做的话，刚写进去的这句话
+           会被自己的检索命中，在上下文的「往事」里重复出现一遍，挤占真实记忆的额度。
+        2. **情绪预判要在拼 system prompt 之前**——否则本轮的心情注入的是上一轮的值。
         """
         self.stats.record_message("user")
         # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
         self.persona = load_persona(self.cfg)
+        self._pre_emotion(user_text)   # P1-6：本轮语气先跟上
+        mem_cfg = self.cfg.get("memory", {}) or {}
         recall = self.memory.build_recall_block(
-            user_text, top_k=int(self.cfg["memory"].get("recall_top_k", 5))
+            user_text,
+            top_k=int(mem_cfg.get("recall_top_k", 5)),
+            pin=bool(mem_cfg.get("pin_important", True)),
+            pin_min=int(mem_cfg.get("pin_min_importance", 8)),
+            pin_limit=int(mem_cfg.get("pin_limit", 5)),
         )
         self.memory.add(self.session_id, "user", user_text)
-        self.llm.system_prompt = self._system_prompt(recall)
+        system_prompt = self._system_prompt(recall)
+        self.llm.system_prompt = system_prompt
         # 近 N 轮在入库之后取，这样模型能看到用户当前这句话
         history = self.memory.recent(
             self.session_id, limit=int(self.cfg["llm"].get("max_history_turns", 20))
         )
-        return [{"role": h["role"], "content": h["content"]} for h in history]
+        messages = [{"role": h["role"], "content": h["content"]} for h in history]
+        self._snapshot_context(system_prompt, messages)
+        return messages
+
+    def _snapshot_context(self, system_prompt: str, messages: list[dict]) -> None:
+        """记录本轮实际发出去的东西，供控制台「🔍 本轮上下文」展示（P2-8）。
+
+        这是唯一能让用户**亲眼确认**"情感/记忆到底注没注入"的手段。
+        """
+        blocks = [{"title": t, "text": x, "chars": len(x)} for t, x in self._context_head]
+        hist_tokens = sum(estimate_tokens(m["content"]) for m in messages)
+        self.last_context = {
+            "blocks": blocks,
+            "history": messages,
+            "history_turns": len(messages),
+            "history_tokens": hist_tokens,
+            "history_chars": sum(len(m["content"]) for m in messages),
+            "system_chars": len(system_prompt),
+            "system_tokens": estimate_tokens(system_prompt),
+            "est_tokens": estimate_tokens(system_prompt) + hist_tokens,
+            "model": str((self.cfg.get("llm", {}) or {}).get("model", "")),
+            "temperature": (self.cfg.get("llm", {}) or {}).get("temperature"),
+            "recall_top_k": int((self.cfg.get("memory", {}) or {}).get("recall_top_k", 5)),
+            "max_history_turns": int(self.cfg.get("llm", {}).get("max_history_turns", 20)),
+            "emotion_injected": any(t == "此刻心情" for t, _ in self._context_head),
+            "recall_injected": any(t == "往事召回" for t, _ in self._context_head),
+            "memory_total": self.memory.count(),
+        }
 
     def _finalize_action_text(self, messages: list[dict], text: str, acts: list[dict],
                               auto_confirm: bool) -> str:

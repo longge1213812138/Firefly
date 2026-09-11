@@ -112,6 +112,9 @@ class EmotionModel:
         self.enabled = bool(ecfg.get("enabled", True))
         self.style_mode = str(ecfg.get("style_mode", "director") or "director").lower()
         self.infer_with_llm = bool(ecfg.get("infer_with_llm", True))
+        # 是否把"此刻的心情"作为一段状态行注入大模型上下文（管"说什么"，
+        # 与 style_instruction 管"怎么念"是两件事）
+        self.inject_to_context = bool(ecfg.get("inject_to_context", True))
         self.decay_per_hour = float(ecfg.get("decay_per_hour", 0.12))
         self.intimacy_gain = float(ecfg.get("max_intimacy_gain_per_turn", 0.01))
         base = dict(DEFAULT_BASELINE)
@@ -355,6 +358,28 @@ class EmotionModel:
 
         threading.Thread(target=_job, daemon=True, name="fairy-emotion").start()
 
+    def pre_turn_hint(self, user_text: str) -> EmotionState:
+        """回复生成**之前**的轻量预判：只用关键词词典，零成本、不调大模型。
+
+        解决 D6「情绪慢一拍」：用户说"我今天特别累"，**第一句**回应就该是低沉的，
+        而不是等这一轮播完、后台 LLM 推断完、下一句才变。
+        轮末仍会照常跑完整推断（甚至用大模型精修），本方法只是"先垫一步"。
+        """
+        if not self.enabled:
+            return self.state
+        guess = self._lexicon_infer(user_text)
+        s = self.state
+        self._decay_to_now()
+        alpha = 0.35  # 比轮末的 0.45 轻：毕竟只是关键词粗判，别抢跑太狠
+        s.valence = _clamp(s.valence * (1 - alpha) + guess["valence"] * alpha, -1.0, 1.0)
+        s.arousal = _clamp(s.arousal * (1 - alpha) + guess["arousal"] * alpha, 0.0, 1.0)
+        s.label, s.compound = describe(s.valence, s.arousal)
+        s.updated_at = int(time.time())
+        s.reason = str(guess.get("reason", ""))[:80]
+        # 不写 emotion_log、不加 turns：这只是本轮的前置垫步，轮末那次才是正式记录
+        self.save()
+        return s
+
     def reset(self, note: str = "手动重置到基准") -> EmotionState:
         s = self.state
         s.valence = self.baseline["valence"]
@@ -407,6 +432,48 @@ class EmotionModel:
             out.append(f"整体呈现「{s.compound}」的复合情绪，而不是单一的机械情绪")
         return out
 
+    # ---------------------------------------------------- 注入 LLM 上下文
+    def _mood_guidance(self) -> list[str]:
+        """把维度翻译成**措辞级**要求（管"说什么"，与 _guidance 的"怎么念"区分）。
+
+        _guidance 是给 TTS 的舞台提示（语速/气息/尾音），大模型看不见也不需要；
+        这里要的是"文字该用什么态度说话"，否则情绪只影响语气、不影响措辞 → 人格不一致。
+        """
+        s = self.state
+        out: list[str] = []
+        if s.valence <= -0.40:
+            out.append("你正跟着对方一起低落：措辞要收敛、轻一点，先接住情绪，"
+                       "别急着讲道理或转去轻松话题")
+        elif s.valence <= -0.10:
+            out.append("你心情略沉：措辞温和克制，不要过分热络")
+        elif s.valence >= 0.45:
+            out.append("你心情不错：可以自然流露轻快与温度，但别浮夸")
+        else:
+            out.append("你心态平稳：照常自然说话即可")
+
+        if s.arousal <= 0.30:
+            out.append("你有点累/懒洋洋：句子短一些，少用感叹号和排比")
+        elif s.arousal >= 0.70:
+            out.append("你情绪比较激动：语气可以有起伏，但别失控")
+
+        if s.intimacy >= 0.60:
+            out.append("你们已经很熟了：少一点客套，多一点随性")
+        elif s.intimacy <= 0.20:
+            out.append("你们还不算太熟：保持分寸，别过分亲昵")
+        return out
+
+    def context_line(self) -> str:
+        """给**大模型**看的「此刻的心情」状态行（不是给 TTS 的演绎指令）。
+
+        约 60~110 字，避免把三维数值原样塞进上下文浪费 token。
+        """
+        s = self.state
+        head = (f"【此刻的心情】你现在是「{s.compound}」"
+                f"（愉悦度 {s.valence:+.2f} / 唤醒度 {s.arousal:.2f} / 亲密度 {s.intimacy:.2f}）。")
+        body = "；".join(self._mood_guidance())
+        tail = "让**文字**的语气与这份心情一致即可，不要向用户描述或复述这些数值。"
+        return f"{head}说话时请与这份心情一致：{body}。{tail}"
+
     def style_brief(self) -> str:
         """一句话自然语言风格指令（官方"直接一句话描述"的用法）。"""
         s = self.state
@@ -436,6 +503,9 @@ class EmotionModel:
         d["enabled"] = self.enabled
         d["style_mode"] = self.style_mode
         d["style_preview"] = self.style_instruction()
+        d["inject_to_context"] = self.inject_to_context
+        d["context_preview"] = (self.context_line()
+                                if (self.enabled and self.inject_to_context) else "")
         d["baseline"] = dict(self.baseline)
         return d
 

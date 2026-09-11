@@ -566,6 +566,135 @@ def run_selftest(cfg: dict) -> int:
               and ok5 and v5 == 880 and (not ok6) and v6 == 7)
         return ok, f"合法={ok1} 非法回退={v2} 空值回退={v3} 空坐标={v4} 整数={v5} 非法坐标回退={v6}"
 
+    # 25e. P1-4：情绪注入大模型上下文（影响「说什么」，不只是「怎么念」）
+    def t_emotion_into_context():
+        import main as main_mod
+        from core.emotion import EmotionModel
+
+        with tempfile.TemporaryDirectory() as td:
+            ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False,
+                                       "inject_to_context": True}}
+            emo = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
+            f = main_mod.Fairy(ecfg, speak=False, verbose=False, emotion=emo)
+            emo.nudge(-0.7, -0.2, 0.0)          # 明显低落
+            neg_prompt = f._system_prompt("")
+            has_section = "【此刻的心情】" in neg_prompt
+            empathic = "低落" in neg_prompt or "收敛" in neg_prompt
+            f.memory.close()
+
+            # 关掉开关 → 不该再出现情绪段
+            off_cfg = {**cfg, "emotion": {**ecfg["emotion"],
+                                          "inject_to_context": False}}
+            emo2 = EmotionModel(off_cfg, db_path=str(Path(td) / "e2.db"))
+            f2 = main_mod.Fairy(off_cfg, speak=False, verbose=False, emotion=emo2)
+            off_prompt = f2._system_prompt("")
+            f2.memory.close()
+            # 情绪整体关闭 → 也不该出现
+            no_cfg = {**cfg, "emotion": {"enabled": False}}
+            f3 = main_mod.Fairy(no_cfg, speak=False, verbose=False)
+            no_prompt = f3._system_prompt("")
+            f3.memory.close()
+            f3.close_emotion()
+            emo.close()
+            emo2.close()
+        ok = (has_section and empathic
+              and "【此刻的心情】" not in off_prompt
+              and "【此刻的心情】" not in no_prompt)
+        return ok, (f"system含情绪段={has_section} 共情措辞={empathic} "
+                    f"关开关后消失={'【此刻的心情】' not in off_prompt} "
+                    f"关情绪后消失={'【此刻的心情】' not in no_prompt}")
+
+    # 25f. P1-5：召回按重要度/分类重排 + 重要记忆常驻注入
+    def t_recall_ranking():
+        from core.memory import Memory
+
+        with tempfile.TemporaryDirectory() as td:
+            mem = Memory(str(Path(td) / "r.db"))
+            mem.add("s1", "user", "随便聊聊天气吧", importance=2)
+            mem.add("s1", "user", "我下周三要去北京出差，帮我记着",
+                    category="待办", importance=9)
+            mem.add("s1", "user", "北京有家烤鸭店不错", importance=5)
+            # ① 重排：都命中「北京」时，重要度高的要排在前面
+            hits = mem.search("北京", limit=3)
+            order_ok = bool(hits) and int(hits[0]["importance"]) >= int(hits[-1]["importance"])
+            # ② 常驻：完全不命中的话题，高重要度那条也要被带上
+            block = mem.build_recall_block("量子力学是什么", top_k=3)
+            pinned_ok = "出差" in block and "天气" not in block
+            # ③ 关掉常驻 → 没命中就不该注入任何东西
+            off = mem.build_recall_block("量子力学是什么", top_k=3, pin=False)
+            mem.close()
+        ok = order_ok and pinned_ok and off == ""
+        return ok, (f"重排首位重要度={hits[0]['importance'] if hits else '?'} "
+                    f"常驻注入={pinned_ok} 关闭常驻后为空={off == ''}")
+
+    # 25g. D9：长自然语言问句也能召回（整句命中不了就拆短词）
+    def t_recall_long_query():
+        from core.memory import Memory
+
+        with tempfile.TemporaryDirectory() as td:
+            mem = Memory(str(Path(td) / "lq.db"))
+            mem.add("s1", "user", "我的猫叫豆豆，很怕打雷")
+            long_hit = mem.search("豆豆怕什么来着？", limit=3)
+            pet_hit = mem.search("我的猫怎么了", limit=3)
+            unrelated = mem.search("量子纠缠的退相干时间", limit=3)
+            mem.close()
+        ok = (len(long_hit) >= 1 and "豆豆" in long_hit[0]["content"]
+              and len(pet_hit) >= 1 and not unrelated)
+        return ok, (f"长问句命中={len(long_hit)} 「我的猫怎么了」命中={len(pet_hit)} "
+                    f"无关长句误召回={len(unrelated)}")
+
+    # 25h. P1-6：情绪预判提前——本轮的语气就跟上来，不等下一轮
+    def t_emotion_pre_hint():
+        import main as main_mod
+        from core.emotion import EmotionModel
+
+        with tempfile.TemporaryDirectory() as td:
+            ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False}}
+            emo = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
+            f = main_mod.Fairy(ecfg, speak=False, verbose=False, emotion=emo)
+            before = (emo.state.valence, emo.state.arousal)
+            f.llm.system_prompt = ""
+            # 只走"准备上下文"这一步（回复还没生成、轮末推断还没跑）
+            f._prepare_messages("我今天特别累，什么都不想干")
+            after = (emo.state.valence, emo.state.arousal)
+            prompt = f.llm.system_prompt
+            f.memory.close()
+            emo.close()
+        ok = after[0] < before[0] and after[1] < before[1] and "【此刻的心情】" in prompt
+        return ok, (f"预判后 愉悦度 {before[0]:+.2f}→{after[0]:+.2f}、"
+                    f"唤醒度 {before[1]:.2f}→{after[1]:.2f}（都应变小）")
+
+    # 25i. P2-8：本轮上下文快照（「🔍 本轮上下文」的数据来源）
+    def t_context_snapshot():
+        import main as main_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False}}
+            f = main_mod.Fairy(ecfg, speak=False, verbose=False)
+
+            class FakeLLM:
+                def __init__(self):
+                    self.system_prompt = ""
+
+                def chat(self, messages):
+                    return "好呀，我记着。"
+
+            f.memory.add(f.session_id, "user", "我叫阿明，住在杭州")
+            f.llm = FakeLLM()
+            f.respond("我叫什么？", auto_confirm=True)
+            ctx = f.last_context or {}
+            titles = [b["title"] for b in ctx.get("blocks", [])]
+            ok = ("人设" in titles and "动作说明" in titles and "此刻心情" in titles
+                  and ctx.get("history_turns", 0) >= 1
+                  and ctx.get("est_tokens", 0) > 0
+                  and ctx.get("emotion_injected") is True
+                  and isinstance(ctx.get("history"), list)
+                  and all("chars" in b for b in ctx.get("blocks", [])))
+            f.memory.close()
+            f.close_emotion()
+        return ok, (f"区块={titles} 历史条数={ctx.get('history_turns')} "
+                    f"估算tokens={ctx.get('est_tokens')} 情绪已注入={ctx.get('emotion_injected')}")
+
     # 26. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
     def t_memory_admin():
         from core.memory import Memory
@@ -652,6 +781,11 @@ def run_selftest(cfg: dict) -> int:
         ("声音设置校验（音色/参考音频/必填项）", t_voice_settings),
         ("情绪单实例注入（情感页↔对话联动）", t_emotion_injection),
         ("保存配置字段解耦（非法数字回退）", t_coerce_numbers),
+        ("情绪注入大模型上下文（P1-4）", t_emotion_into_context),
+        ("记忆召回重排与重要记忆常驻（P1-5）", t_recall_ranking),
+        ("长问句拆词召回（D9 兜底）", t_recall_long_query),
+        ("情绪预判提前（P1-6 本轮语气）", t_emotion_pre_hint),
+        ("本轮上下文快照（P2-8 可视化数据）", t_context_snapshot),
         ("记忆管理（筛选/翻页/删除）", t_memory_admin),
         ("打包后项目根指向exe目录", t_frozen_root),
     ]:

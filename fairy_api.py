@@ -80,22 +80,47 @@ def cmd_ping(cfg: dict, args) -> int:
 
 
 def _system_block(cfg: dict, query: str, top_k: int) -> tuple[str, str, int]:
-    """组装注入用的整块文本，逻辑与 Fairy._system_prompt 保持一致，避免人格漂移。"""
+    """组装注入用的整块文本，逻辑与 Fairy._system_prompt 保持一致，避免人格漂移。
+
+    注意：这里和 main.py 的 `_system_prompt` 是**同一份拼装规则的两处实现**，
+    改了其中一处就要同步另一处（区块顺序：人设 → 动作说明 → 往事召回 → 此刻心情）。
+    """
     from core import actions
     from core.config import load_persona
+    from core.emotion import EmotionModel
     from core.memory import Memory
 
     persona = load_persona(cfg)
-    recall, count = "", 0
+    recall, count, mood = "", 0, ""
+    mem_cfg = cfg.get("memory", {}) or {}
     if (query or "").strip():
         mem = Memory(cfg["memory"]["db_path"])
-        recall = mem.build_recall_block(query, top_k=top_k)
-        count = len(mem.search(query, limit=top_k)) if recall else 0
+        recall = mem.build_recall_block(
+            query, top_k=top_k,
+            pin=bool(mem_cfg.get("pin_important", True)),
+            pin_min=int(mem_cfg.get("pin_min_importance", 8)),
+            pin_limit=int(mem_cfg.get("pin_limit", 5)),
+        )
+        count = len(mem.search(query, limit=top_k))
         mem.close()
+
+    # 心情段与 Fairy._mood_context 对齐（共用同一个 emotion.inject_to_context 开关）
+    emo_cfg = cfg.get("emotion", {}) or {}
+    if bool(emo_cfg.get("inject_to_context", True)):
+        try:
+            emo = EmotionModel(cfg, db_path=cfg["memory"]["db_path"])
+            if emo.enabled and emo.inject_to_context:
+                mood = emo.context_line()
+            emo.close()
+        except Exception:  # noqa: BLE001
+            mood = ""
+
     parts = [persona, "", actions.DESCRIPTIONS]
     if recall:
         parts += ["", "【你记得的与当前话题相关的往事】", recall,
                   "（自然地运用这些记忆，不要生硬地复述，也不要说你查了数据库）"]
+    if mood:
+        parts += ["", mood]
     return "\n".join(parts), recall, count
 
 
