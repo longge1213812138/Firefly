@@ -128,3 +128,4 @@
 | ccb3f1f | 2026-09-11 01:40:29 | fix: 修复打包后四个问题 | ccb3f1f736cf414c3a8a241cff619da12c25761f |
 | d4b96f4 | 2026-09-12 00:56:55 | fix: 桌宠随控制台同步启动 + 桌宠设置整合进控制台（自检 28 项） | d4b96f4ba8de739dd48a541afaf358cb0415af45 |
 | d1fcbbc | 2026-09-12 01:45:33 | fix: 声音设置全面修复（对齐 MiMo 官方文档）——克隆改走 audio.voice data URI + 音色下拉 + 确认按钮与反馈 | d1fcbbce299e7a5817762dce5bebf164e8b8af08 |
+| e70bab7 | 2026-09-12 02:25:09 |  | e70bab799f7cf3d962d3e967b2b1c4b4f7ae8efb |
