@@ -234,3 +234,61 @@ def tts_settings_issues(settings: dict) -> list[str]:
         if not ok:
             issues.append(f"声音克隆需要可用的参考音频：{detail}")
     return issues
+
+
+# 三种合成方式下，各输入项是「可用 / 必填」还是「不适用」。
+# 以前三个框一直全开，导致 voiceclone 下还能选音色，让人以为"克隆要先选音色"（审查报告 D3）。
+_FIELD_STATES = {
+    "mimo-v2.5-tts": {
+        "voice_enabled": True,
+        "voice_label": "音色",
+        "voice_hint": "预置音色方式必填；也可以手动输入音色 ID",
+        "instr_enabled": True,
+        "instr_label": "风格指令",
+        "instr_hint": "可选：想固定一种说话风格就写在这里（实时情绪会自动叠加）",
+        "ref_enabled": False,
+        "ref_hint": "预置音色方式不需要参考音频",
+    },
+    "mimo-v2.5-tts-voicedesign": {
+        "voice_enabled": False,
+        "voice_label": "音色（本方式不用）",
+        "voice_hint": "音色设计方式的声音由下方「音色描述」生成，不选音色",
+        "instr_enabled": True,
+        "instr_label": "音色描述",
+        "instr_hint": "必填，例：温柔甜美的年轻女性，语速适中",
+        "ref_enabled": False,
+        "ref_hint": "音色设计方式不需要参考音频",
+    },
+    "mimo-v2.5-tts-voiceclone": {
+        "voice_enabled": False,
+        "voice_label": "音色（本方式不用）",
+        "voice_hint": "克隆出来的声音来自下方参考音频，不选音色",
+        "instr_enabled": True,
+        "instr_label": "风格指令",
+        "instr_hint": "可选：想固定说话风格就写在这里（实时情绪会自动叠加）",
+        "ref_enabled": True,
+        "ref_hint": "必填：10~30 秒清晰人声，仅支持 wav/mp3",
+    },
+}
+
+# 认不出的模型（例如以后官方加了新名字）一律全开，别把用户的手脚捆住
+_DEFAULT_FIELD_STATE = {
+    "voice_enabled": True,
+    "voice_label": "音色",
+    "voice_hint": "也可以手动输入音色 ID",
+    "instr_enabled": True,
+    "instr_label": "音色描述 / 风格指令",
+    "instr_hint": "按所选模型的要求填写",
+    "ref_enabled": True,
+    "ref_hint": "仅声音克隆需要；10~30 秒清晰人声，wav/mp3",
+}
+
+
+def tts_field_states(model: str) -> dict:
+    """当前合成方式下，「音色 / 音色描述 / 参考音频」三个输入项的可用性与文案。
+
+    纯函数（不碰界面、不联网），GUI 与自检共用同一套判断，避免两边说法不一致。
+    """
+    m = str(model or "").strip()
+    return dict(_FIELD_STATES.get(m, _DEFAULT_FIELD_STATE))
+

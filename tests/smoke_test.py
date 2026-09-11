@@ -659,10 +659,23 @@ def run_selftest(cfg: dict) -> int:
             after = (emo.state.valence, emo.state.arousal)
             prompt = f.llm.system_prompt
             f.memory.close()
+
+            # 关掉开关后，同样的输入不应再"抢跑"（行为给出开关，别让用户没法选择）
+            off_cfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False,
+                                          "pre_hint": False}}
+            emo2 = EmotionModel(off_cfg, db_path=str(Path(td) / "e2.db"))
+            f2 = main_mod.Fairy(off_cfg, speak=False, verbose=False, emotion=emo2)
+            b2 = (emo2.state.valence, emo2.state.arousal)
+            f2._prepare_messages("我今天特别累，什么都不想干")
+            a2 = (emo2.state.valence, emo2.state.arousal)
+            f2.memory.close()
             emo.close()
-        ok = after[0] < before[0] and after[1] < before[1] and "【此刻的心情】" in prompt
+            emo2.close()
+        ok = (after[0] < before[0] and after[1] < before[1]
+              and "【此刻的心情】" in prompt and a2 == b2)
         return ok, (f"预判后 愉悦度 {before[0]:+.2f}→{after[0]:+.2f}、"
-                    f"唤醒度 {before[1]:.2f}→{after[1]:.2f}（都应变小）")
+                    f"唤醒度 {before[1]:.2f}→{after[1]:.2f}（都应变小）｜"
+                    f"关掉开关后不变={a2 == b2}")
 
     # 25i. P2-8：本轮上下文快照（「🔍 本轮上下文」的数据来源）
     def t_context_snapshot():
@@ -694,6 +707,55 @@ def run_selftest(cfg: dict) -> int:
             f.close_emotion()
         return ok, (f"区块={titles} 历史条数={ctx.get('history_turns')} "
                     f"估算tokens={ctx.get('est_tokens')} 情绪已注入={ctx.get('emotion_injected')}")
+
+    # 25j. D3：合成方式联动——各输入项的可用性与文案（纯函数）
+    def t_tts_field_states():
+        from core.tts import tts_field_states
+
+        preset = tts_field_states("mimo-v2.5-tts")
+        design = tts_field_states("mimo-v2.5-tts-voicedesign")
+        clone = tts_field_states("mimo-v2.5-tts-voiceclone")
+        unknown = tts_field_states("以后官方新加的模型")
+        alltext = all(v["voice_label"] and v["voice_hint"] and v["instr_hint"] and v["ref_hint"]
+                      for v in (preset, design, clone, unknown))
+        ok = (
+            # 预置音色：音色可用，参考音频不适用
+            preset["voice_enabled"] and not preset["ref_enabled"]
+            # 音色设计：音色禁用，这一栏的正确名字是「音色描述」
+            and (not design["voice_enabled"]) and design["instr_label"] == "音色描述"
+            and (not design["ref_enabled"])
+            # 声音克隆：音色禁用 + 参考音频可用 + 描述栏改叫「风格指令」
+            and (not clone["voice_enabled"]) and clone["ref_enabled"]
+            and clone["instr_label"] == "风格指令"
+            # 认不出的模型一律全开，别把用户手脚捆住
+            and unknown["voice_enabled"] and unknown["instr_enabled"] and unknown["ref_enabled"]
+            and alltext
+        )
+        return ok, (f"预置=音色{preset['voice_enabled']}/参考{preset['ref_enabled']}｜"
+                    f"设计=音色{design['voice_enabled']}/{design['instr_label']}｜"
+                    f"克隆=音色{clone['voice_enabled']}/参考{clone['ref_enabled']}"
+                    f"/{clone['instr_label']}｜未知模型全开={unknown['ref_enabled']}")
+
+    # 25k. C1：「清理过期」要先能报数量（不可逆操作得先告诉用户要删多少条）
+    def t_memory_expired():
+        import time as _t
+
+        from core.memory import Memory
+
+        with tempfile.TemporaryDirectory() as td:
+            mem = Memory(str(Path(td) / "exp.db"))
+            mem.add("s1", "user", "这条永不过期")
+            now = int(_t.time())
+            mem.add("s1", "user", "这条已经过期了", expires_at=now - 10)
+            mem.add("s1", "user", "这条还没到期", expires_at=now + 3600)
+            n1 = mem.count_expired()
+            n2 = mem.count_expired()          # 只是数数，不能动数据
+            removed = mem.cleanup_expired()
+            left = mem.count()
+            n3 = mem.count_expired()
+            mem.close()
+        ok = (n1 == 1 and n2 == 1 and removed == 1 and n3 == 0 and left == 2)
+        return ok, (f"过期数={n1} 计数不动数据={n2 == n1} 清理={removed} 剩余={left}")
 
     # 26. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
     def t_memory_admin():
@@ -786,6 +848,8 @@ def run_selftest(cfg: dict) -> int:
         ("长问句拆词召回（D9 兜底）", t_recall_long_query),
         ("情绪预判提前（P1-6 本轮语气）", t_emotion_pre_hint),
         ("本轮上下文快照（P2-8 可视化数据）", t_context_snapshot),
+        ("合成方式联动字段可用性（D3）", t_tts_field_states),
+        ("过期记忆计数与清理（C1 清理前报数量）", t_memory_expired),
         ("记忆管理（筛选/翻页/删除）", t_memory_admin),
         ("打包后项目根指向exe目录", t_frozen_root),
     ]:

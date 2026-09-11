@@ -378,6 +378,13 @@ class Memory:
             )
             self.conn.commit()
 
+    def count_expired(self) -> int:
+        """有多少条已过期（供「清理过期」先报数量再当面确认用）。"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM messages "
+                    "WHERE expires_at>0 AND expires_at<?", (int(time.time()),))
+        return int(cur.fetchone()["c"])
+
     def cleanup_expired(self) -> int:
         """清理过期记忆，返回清理数量。"""
         now = int(time.time())

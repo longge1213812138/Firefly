@@ -94,11 +94,12 @@
 
   "emotion": {
     "_说明": "程序化情绪模型（对齐小米 MiMo-V2.5-TTS 官方方案）。情绪是数值化的三维状态（愉悦度/唤醒度/亲密度），随对话演化、随时间平复；每轮由 MiMo 大模型推断（严格 JSON），失败时用关键词兜底。最终翻译成自然语言风格指令发给 TTS（按官方规范放 role=user）。",
-    "_字段": "enabled 开关；style_mode=director(导演模式：角色/场景/指导，表现力更强) 或 brief(一句话)；infer_with_llm 是否用大模型推断（关掉则纯关键词，更省钱但更粗）；inject_to_context 是否把「此刻的心情」也注入大模型上下文（管文字措辞，与管语音语气的 style_mode 是两件事，关掉就只有语气变、措辞不变）；decay_per_hour 每小时向基准平复的比例；baseline 基准情绪；max_intimacy_gain_per_turn 每轮亲密度增量上限。",
+    "_字段": "enabled 开关；style_mode=director(导演模式：角色/场景/指导，表现力更强) 或 brief(一句话)；infer_with_llm 是否用大模型推断（关掉则纯关键词，更省钱但更粗）；inject_to_context 是否把「此刻的心情」也注入大模型上下文（管文字措辞，与管语音语气的 style_mode 是两件事，关掉就只有语气变、措辞不变）；pre_hint 是否在生成回复前先用关键词预判一次情绪（让本轮语气就跟上，关掉则情绪慢一拍）；decay_per_hour 每小时向基准平复的比例；baseline 基准情绪；max_intimacy_gain_per_turn 每轮亲密度增量上限。",
     "enabled": true,
     "style_mode": "director",
     "infer_with_llm": true,
     "inject_to_context": true,
+    "pre_hint": true,
     "decay_per_hour": 0.12,
     "baseline": {
       "valence": 0.25,

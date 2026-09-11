@@ -115,6 +115,8 @@ class EmotionModel:
         # 是否把"此刻的心情"作为一段状态行注入大模型上下文（管"说什么"，
         # 与 style_instruction 管"怎么念"是两件事）
         self.inject_to_context = bool(ecfg.get("inject_to_context", True))
+        # 回复生成前先用关键词垫一步（让本轮语气就跟上来）；不喜欢这种"抢跑"可以关掉
+        self.pre_hint = bool(ecfg.get("pre_hint", True))
         self.decay_per_hour = float(ecfg.get("decay_per_hour", 0.12))
         self.intimacy_gain = float(ecfg.get("max_intimacy_gain_per_turn", 0.01))
         base = dict(DEFAULT_BASELINE)
@@ -365,7 +367,7 @@ class EmotionModel:
         而不是等这一轮播完、后台 LLM 推断完、下一句才变。
         轮末仍会照常跑完整推断（甚至用大模型精修），本方法只是"先垫一步"。
         """
-        if not self.enabled:
+        if not self.enabled or not self.pre_hint:
             return self.state
         guess = self._lexicon_infer(user_text)
         s = self.state
@@ -504,6 +506,7 @@ class EmotionModel:
         d["style_mode"] = self.style_mode
         d["style_preview"] = self.style_instruction()
         d["inject_to_context"] = self.inject_to_context
+        d["pre_hint"] = self.pre_hint
         d["context_preview"] = (self.context_line()
                                 if (self.enabled and self.inject_to_context) else "")
         d["baseline"] = dict(self.baseline)

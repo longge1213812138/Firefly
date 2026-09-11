@@ -55,7 +55,7 @@ APP_ROOT = resolve_root()
 from core.memory import Memory  # noqa: E402
 from core.stats import UsageStats  # noqa: E402
 from core.tts import (TTS_MODELS, list_available_voices, get_voice_info,  # noqa: E402
-                      tts_settings_issues, validate_reference_audio,
+                      tts_field_states, tts_settings_issues, validate_reference_audio,
                       voice_choices, voice_display_for_id, voice_id_for_display)
 
 FONT = ("Microsoft YaHei UI", 10)
@@ -491,7 +491,16 @@ class ConsoleApp:
                                               "实际发给大模型的人设 / 往事 / 心情 / 对话历史。")
             return
 
+        # 只保留一个上下文窗口：反复点按钮不该开出一堆一模一样的窗口
+        old = getattr(self, "_ctx_win", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+
         win = tk.Toplevel(self.root)
+        self._ctx_win = win
         win.title("本轮上下文（实际发给大模型的内容）")
         win.geometry("760x620")
         box = ScrolledText(win, font=FONT_SMALL, wrap="word", state="normal")
@@ -842,6 +851,16 @@ class ConsoleApp:
         ttk.Label(head, textvariable=self.emo_reason_var, font=FONT_SMALL,
                   foreground="#8a8f98").pack(side="left", padx=10)
 
+        # 生效状态行 + 跳转引导：关掉情绪后用户要知道"去哪开、什么时候生效"（审查报告 D7）
+        strow = ttk.Frame(f)
+        strow.pack(fill="x", padx=10, pady=(0, 4))
+        self.emo_state_var = tk.StringVar(value="情绪模型：读取中…")
+        self.emo_state_label = ttk.Label(strow, textvariable=self.emo_state_var,
+                                         font=FONT_SMALL, foreground="#8a8f98")
+        self.emo_state_label.pack(side="left")
+        ttk.Button(strow, text="⚙ 去配置页改情绪设置",
+                   command=self._goto_config_tab).pack(side="right")
+
         self.emo_canvas = tk.Canvas(f, height=112, highlightthickness=0, background="#fbfbf7")
         self.emo_canvas.pack(fill="x", padx=10, pady=(4, 4))
 
@@ -925,11 +944,20 @@ class ConsoleApp:
         if not payload:
             return
         s = payload.get("snapshot") or {}
+        self._emo_last = s          # 留给「重置到基准」弹窗显示 当前值→基准值
+        enabled = bool(s.get("enabled", True))
         self.emo_title_var.set(f"当前情绪：{s.get('label', '?')}（{s.get('compound', '')}）"
                                f"｜累计 {s.get('turns', 0)} 轮")
         self.emo_reason_var.set(s.get("reason") or "")
-        if not s.get("enabled", True):
-            self.emo_title_var.set("情绪模型已在 config.json 里关闭（emotion.enabled=false）")
+        if enabled:
+            extra = "" if s.get("inject_to_context", True) else "（只影响语音语气，未注入大模型）"
+            self.emo_state_var.set(f"情绪模型：已启用{extra}｜手动微调与配置改动即刻生效")
+            self.emo_state_label.configure(foreground="#1f7a3d")
+        else:
+            self.emo_title_var.set("当前情绪：—（情绪模型已关闭）")
+            self.emo_state_var.set("情绪模型：已关闭——语音与文字都不再带情绪。"
+                                   "点右侧按钮去「配置」页打开，再点「保存配置」即刻生效。")
+            self.emo_state_label.configure(foreground="#b23b3b")
         c = self.emo_canvas
         c.delete("all")
         self._draw_bar(c, 4, "愉悦度", float(s.get("valence", 0.0)), -1.0, 1.0, "#378ADD", "{:+.2f}")
@@ -943,12 +971,133 @@ class ConsoleApp:
         self._draw_emotion_history(payload.get("history") or [])
 
     def _reset_emotion(self) -> None:
+        """重置到基准值——**会连累积的亲密度一起丢掉**，所以必须先确认。"""
+        s = getattr(self, "_emo_last", None) or {}
+        base = s.get("baseline") or {}
+        if s:
+            detail = (f"当前：愉悦度 {float(s.get('valence', 0)):+.2f}｜"
+                      f"唤醒度 {float(s.get('arousal', 0)):.2f}｜"
+                      f"亲密度 {float(s.get('intimacy', 0)):.2f}\n"
+                      f"重置为：愉悦度 {float(base.get('valence', 0)):+.2f}｜"
+                      f"唤醒度 {float(base.get('arousal', 0)):.2f}｜"
+                      f"亲密度 {float(base.get('intimacy', 0)):.2f}\n\n"
+                      "亲密度是长期聊天一点点攒起来的，重置后会一起归零到基准，且无法撤销。")
+        else:
+            detail = "会把三维情绪全部恢复成基准值，无法撤销。"
+        if not messagebox.askyesno("重置到基准值", f"{detail}\n\n确定重置吗？", icon="warning"):
+            return
         self.worker.submit("emotion_nudge", "reset", 0.0, 0.0, 0.0)
 
     def _nudge_emotion(self, dv: float, da: float, di: float) -> None:
         self.worker.submit("emotion_nudge", "nudge", dv, da, di)
 
+    def _goto_config_tab(self) -> None:
+        """跳到「配置」页（情绪开关、注入开关都在那里）——D7 的跳转引导。"""
+        try:
+            for i in range(self.nb.index("end")):
+                if "配置" in str(self.nb.tab(i, "text")):
+                    self.nb.select(i)
+                    return
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_emo_effect_hint(self) -> None:
+        """情绪开关的生效时机提示（D7）：明确告诉用户"改完什么时候生效、以什么方式生效"。"""
+        try:
+            if bool(self.emo_enabled_var.get()):
+                self.emo_effect_var.set(
+                    "生效方式：勾上后，语音语气与文字措辞都会跟着情绪走。"
+                    "改完点下方「保存配置」即刻生效（会重载大脑，无需重启程序）。")
+                self.emo_effect_label.configure(foreground="#1f7a3d")
+            else:
+                self.emo_effect_var.set(
+                    "生效方式：取消勾选后，语音与文字都不再带情绪，情感页会显示「已关闭」。"
+                    "点下方「保存配置」即刻生效。")
+                self.emo_effect_label.configure(foreground="#b23b3b")
+        except Exception:  # noqa: BLE001
+            pass
+
     # ============ ④ 配置 ============
+    # 配置页里「改了必须点保存才生效」的字段：(人话名称, 界面变量属性名)。
+    # 只登记界面变量本身、不做配置键映射——避免和 _save_config 的映射各写一份、日久走样。
+    # 刻意排除：API Key（只写不回显）、开机自启（本来就是即时生效、有自己的确认）。
+    _CFG_WATCH = (
+        ("大脑模型", "model_var"),
+        ("大脑接口地址", "baseurl_var"),
+        ("合成方式", "tts_model_var"),
+        ("音色", "voice_var"),
+        ("音色描述/风格指令", "voice_instruction_var"),
+        ("参考音频", "ref_audio_var"),
+        ("性格随机度", "temp_var"),
+        ("唤醒词", "keyword_var"),
+        ("录音静音阈值", "thresh_var"),
+        ("说完停顿判定", "tail_var"),
+        ("允许语音打断", "barge_var"),
+        ("桌宠开关", "pet_var"),
+        ("桌宠演示模式", "pet_demo_var"),
+        ("桌宠大小", "pet_scale_var"),
+        ("桌宠不透明度", "pet_opacity_var"),
+        ("桌宠初始位置X", "pet_x_var"),
+        ("桌宠初始位置Y", "pet_y_var"),
+        ("每轮召回往事条数", "recall_k_var"),
+        ("携带对话轮数", "hist_turns_var"),
+        ("重要记忆常驻", "pin_var"),
+        ("常驻记忆门槛", "pin_min_var"),
+        ("常驻记忆条数", "pin_limit_var"),
+        ("启用情绪模型", "emo_enabled_var"),
+        ("情绪用大模型推断", "emo_llm_var"),
+        ("情绪风格模式", "emo_mode_var"),
+        ("情绪基准·愉悦度", "emo_base_v_var"),
+        ("情绪基准·唤醒度", "emo_base_a_var"),
+        ("情绪基准·亲密度", "emo_base_i_var"),
+        ("情绪每小时平复", "emo_decay_var"),
+        ("情绪注入上下文", "emo_inject_var"),
+        ("情绪回复前预判", "emo_prehint_var"),
+        ("允许 /pi 调用", "pi_enabled_var"),
+        ("Pi 只读模式", "pi_ro_var"),
+        ("Pi 超时", "pi_timeout_var"),
+        ("Pi 输出模式", "pi_mode_var"),
+        ("pi 路径", "pi_cli_var"),
+        ("Pi 工作目录", "pi_cwd_var"),
+    )
+
+    def _cfg_watch_items(self) -> list[tuple[str, object]]:
+        out: list[tuple[str, object]] = []
+        for label, attr in self._CFG_WATCH:
+            var = getattr(self, attr, None)
+            if var is not None:
+                out.append((label, var))
+        return out
+
+    def _ui_cfg_snapshot(self) -> dict:
+        """当前界面上的配置值快照（全部取字符串，比较稳定、不受类型影响）。"""
+        return {label: str(var.get()) for label, var in self._cfg_watch_items()}
+
+    def _cfg_dirty_changes(self) -> list[str]:
+        """哪些配置字段改了但还没点「保存配置」（防止"以为改了其实没生效"）。"""
+        snap = getattr(self, "_cfg_snapshot", None)
+        if snap is None:
+            return []
+        now = self._ui_cfg_snapshot()
+        return [label for label, val in now.items() if snap.get(label) != val]
+
+    def _persona_dirty(self) -> bool:
+        """人设文本框里是否有未点「保存人设」的修改。"""
+        try:
+            text = self.persona_box.get("1.0", "end").rstrip() + "\n"
+            p = Path(self.cfg.get("persona_path", ""))
+            return p.exists() and p.read_text(encoding="utf-8") != text
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _refresh_cfg_dirty_hint(self) -> None:
+        try:
+            changed = self._cfg_dirty_changes()
+            self.cfg_dirty_var.set(
+                f"● 有 {len(changed)} 项修改未保存，点右边「保存配置」才生效" if changed else "")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _build_config_tab(self) -> None:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 配置 ")
@@ -1013,39 +1162,52 @@ class ConsoleApp:
 
         vrow2 = ttk.Frame(vbox)
         vrow2.pack(fill="x", padx=8, pady=2)
-        ttk.Label(vrow2, text="音色", font=FONT).pack(side="left")
+        self.voice_label = ttk.Label(vrow2, text="音色", font=FONT)
+        self.voice_label.pack(side="left")
         cur_voice = self.cfg.get("tts", {}).get("voice") or mimo.get("voice", "mimo_default")
         self.voice_var = tk.StringVar(value=voice_display_for_id(cur_voice))
-        ttk.Combobox(vrow2, textvariable=self.voice_var, width=28,
-                     values=[d for d, _ in voice_choices()]).pack(side="left", padx=(4, 8))
-        ttk.Label(vrow2, text="预置音色方式用；也可以手动输入音色 ID", font=FONT_SMALL,
-                  foreground="#8a8f98").pack(side="left")
+        self.voice_box = ttk.Combobox(vrow2, textvariable=self.voice_var, width=28,
+                                      values=[d for d, _ in voice_choices()])
+        self.voice_box.pack(side="left", padx=(4, 8))
+        self.voice_hint = ttk.Label(vrow2, text="", font=FONT_SMALL, foreground="#8a8f98")
+        self.voice_hint.pack(side="left")
 
         vrow3 = ttk.Frame(vbox)
         vrow3.pack(fill="x", padx=8, pady=2)
-        ttk.Label(vrow3, text="音色描述", font=FONT).pack(side="left")
+        self.voice_instr_label = ttk.Label(vrow3, text="音色描述", font=FONT)
+        self.voice_instr_label.pack(side="left")
         self.voice_instruction_var = tk.StringVar(
             value=self.cfg.get("tts", {}).get("voice_instruction", ""))
-        ttk.Entry(vrow3, textvariable=self.voice_instruction_var, width=42).pack(side="left", padx=(4, 8))
-        ttk.Label(vrow3, text="音色设计必填，例：温柔甜美的年轻女性，语速适中", font=FONT_SMALL,
-                  foreground="#8a8f98").pack(side="left")
+        self.voice_instr_entry = ttk.Entry(vrow3, textvariable=self.voice_instruction_var,
+                                           width=42)
+        self.voice_instr_entry.pack(side="left", padx=(4, 8))
+        self.voice_instr_hint = ttk.Label(vrow3, text="", font=FONT_SMALL,
+                                          foreground="#8a8f98")
+        self.voice_instr_hint.pack(side="left")
 
         vrow4 = ttk.Frame(vbox)
         vrow4.pack(fill="x", padx=8, pady=2)
-        ttk.Label(vrow4, text="参考音频", font=FONT).pack(side="left")
+        self.ref_label = ttk.Label(vrow4, text="参考音频", font=FONT)
+        self.ref_label.pack(side="left")
         self.ref_audio_var = tk.StringVar(
             value=self.cfg.get("tts", {}).get("reference_audio_path", ""))
-        ttk.Entry(vrow4, textvariable=self.ref_audio_var, width=34).pack(side="left", padx=(4, 4))
-        ttk.Button(vrow4, text="浏览…", command=self._browse_ref_audio).pack(side="left")
-        ttk.Button(vrow4, text="🎙 现场录制", command=self._record_ref_audio).pack(side="left", padx=(4, 8))
-        ttk.Label(vrow4, text="声音克隆必填：10~30 秒清晰人声，仅支持 wav/mp3", font=FONT_SMALL,
-                  foreground="#8a8f98").pack(side="left")
+        self.ref_entry = ttk.Entry(vrow4, textvariable=self.ref_audio_var, width=34)
+        self.ref_entry.pack(side="left", padx=(4, 4))
+        self.btn_ref_browse = ttk.Button(vrow4, text="浏览…", command=self._browse_ref_audio)
+        self.btn_ref_browse.pack(side="left")
+        self.btn_ref_record = ttk.Button(vrow4, text="🎙 现场录制",
+                                        command=self._record_ref_audio)
+        self.btn_ref_record.pack(side="left", padx=(4, 8))
+        self.ref_hint = ttk.Label(vrow4, text="", font=FONT_SMALL, foreground="#8a8f98")
+        self.ref_hint.pack(side="left")
 
         vrow5 = ttk.Frame(vbox)
         vrow5.pack(fill="x", padx=8, pady=(4, 2))
         self.btn_voice_test = ttk.Button(vrow5, text="🔊 试听当前声音", command=self._test_voice)
         self.btn_voice_test.pack(side="left")
-        ttk.Button(vrow5, text="✔ 校验参考音频", command=self._validate_ref_audio).pack(side="left", padx=6)
+        self.btn_ref_validate = ttk.Button(vrow5, text="✔ 校验参考音频",
+                                          command=self._validate_ref_audio)
+        self.btn_ref_validate.pack(side="left", padx=6)
         ttk.Button(vrow5, text="💾 保存声音设置", command=self._save_voice_settings).pack(side="left")
 
         vrow6 = ttk.Frame(vbox)
@@ -1221,8 +1383,22 @@ class ConsoleApp:
         self.emo_inject_var = tk.BooleanVar(value=bool(e_cfg.get("inject_to_context", True)))
         ttk.Checkbutton(erow3, text="把「此刻心情」注入大模型（影响文字措辞）",
                         variable=self.emo_inject_var).pack(side="left")
-        ttk.Label(erow3, text="关掉的话，情绪只改变语音语气，不影响它说什么",
-                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
+        self.emo_prehint_var = tk.BooleanVar(value=bool(e_cfg.get("pre_hint", True)))
+        ttk.Checkbutton(erow3, text="回复前先用关键词预判情绪（本轮语气就跟上）",
+                        variable=self.emo_prehint_var).pack(side="left", padx=12)
+        ttk.Label(erow3, text="两项都关掉的话，情绪只改变语音语气、且慢一拍",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=4)
+
+        # 生效时机提示：情绪设置是在「保存配置」重载大脑时才生效的（审查报告 D7）
+        erow4 = ttk.Frame(wrap)
+        erow4.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(0, 3))
+        self.emo_effect_var = tk.StringVar(value="")
+        self.emo_effect_label = ttk.Label(erow4, textvariable=self.emo_effect_var,
+                                          font=FONT_SMALL)
+        self.emo_effect_label.pack(side="left")
+        self.emo_enabled_var.trace_add("write", lambda *_: self._refresh_emo_effect_hint())
+        self._refresh_emo_effect_hint()
+
 
         # ---------- Pi 协作 ----------
         ttk.Label(wrap, text="Pi 协作（只在明确要求时调用外部 agent）", font=FONT_BOLD).grid(
@@ -1279,8 +1455,15 @@ class ConsoleApp:
 
         btns = ttk.Frame(f)
         btns.pack(fill="x", padx=10, pady=(0, 10))
+        self.cfg_dirty_var = tk.StringVar(value="")
+        ttk.Label(btns, textvariable=self.cfg_dirty_var, font=FONT_SMALL,
+                  foreground="#b23b3b").pack(side="left")
         ttk.Button(btns, text="保存人设", command=self._save_persona).pack(side="right")
         ttk.Button(btns, text="保存配置（并重载大脑）", command=self._save_config).pack(side="right", padx=8)
+
+        # 切页面时提示"还有没保存的修改"（退出时也会再确认一次，见 _quit_app）
+        self.nb.bind("<<NotebookTabChanged>>", lambda ev: self._refresh_cfg_dirty_hint())
+        self._cfg_snapshot = self._ui_cfg_snapshot()
 
     def _save_persona(self) -> None:
         text = self.persona_box.get("1.0", "end").rstrip() + "\n"
@@ -1302,6 +1485,7 @@ class ConsoleApp:
         cur_emo = cfg_now.get("emotion", {}) or {}
         cur_emo_base = cur_emo.get("baseline", {}) or {}
         bad: list[str] = []
+        notes: list[str] = []   # 非错误的提示（如"这次没换 Key"），跟 bad 一起展示
 
         def num(var, field: str, default) -> float:
             ok, val = coerce_number(var.get(), default)
@@ -1356,7 +1540,21 @@ class ConsoleApp:
         raw.setdefault("mimo", {})
         new_key = self.key_var.get().strip()
         if new_key:
-            raw["mimo"]["api_key"] = new_key  # 留空 = 保持原 Key 不变
+            old_key = str((raw.get("mimo") or {}).get("api_key") or "")
+            if old_key and new_key != old_key:
+                # 旧 Key 从不回显（安全设计），一旦覆盖就再也拿不回来了 → 必须先说清楚
+                if not messagebox.askyesno(
+                        "更换 API Key",
+                        "你正在更换一个已经配置好的 API Key。\n\n"
+                        "为了安全，旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                        "就得回小米开放平台重新复制一次。\n\n"
+                        "选「否」= 不换 Key，其余设置照常保存。\n\n确定更换吗？",
+                        icon="warning"):
+                    self.key_var.set("")   # 清空输入 → 下面不会再写入，保持原 Key
+                    notes.append("API Key 未更换（保留了原来的 Key）")
+                    new_key = ""
+            if new_key:
+                raw["mimo"]["api_key"] = new_key  # 留空 = 保持原 Key 不变
         raw.setdefault("llm", {})
         raw["llm"]["model"] = self.model_var.get().strip()
         raw["llm"]["base_url"] = self.baseurl_var.get().strip()
@@ -1393,6 +1591,7 @@ class ConsoleApp:
         raw["emotion"]["infer_with_llm"] = bool(self.emo_llm_var.get())
         raw["emotion"]["style_mode"] = self.emo_mode_var.get().strip() or "director"
         raw["emotion"]["inject_to_context"] = bool(self.emo_inject_var.get())
+        raw["emotion"]["pre_hint"] = bool(self.emo_prehint_var.get())
         raw["emotion"]["decay_per_hour"] = emo_decay
         raw["emotion"].setdefault("baseline", {})
         raw["emotion"]["baseline"]["valence"] = emo_v
@@ -1408,16 +1607,19 @@ class ConsoleApp:
         raw["pi"]["mode"] = self.pi_mode_var.get().strip() or "text"
         cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         self.cfg = load_config()  # 内存里的配置同步刷新（桌宠重启等会用到）
+        self._cfg_snapshot = self._ui_cfg_snapshot()   # 记下"已保存"的界面状态（退出保护用）
+        self._refresh_cfg_dirty_hint()
         self.worker.submit("reload")
+        note_tail = ("\n\n另外：\n· " + "\n· ".join(notes)) if notes else ""
         if bad:
             messagebox.showwarning(
                 "已保存（有字段填错了）",
                 "配置已保存并重载。以下字段不是合法数字，已保留它们原来的值，"
-                "其余设置（包括声音/音色）照常生效：\n\n· " + "\n· ".join(bad))
+                "其余设置（包括声音/音色）照常生效：\n\n· " + "\n· ".join(bad) + note_tail)
         else:
             messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n"
                                           "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置；\n"
-                                          "  桌宠设置点「重启桌宠」立即生效）")
+                                          "  桌宠设置点「重启桌宠」立即生效）" + note_tail)
 
     def _toggle_autostart(self) -> None:
         enable = bool(self.autostart_var.get())
@@ -1442,6 +1644,34 @@ class ConsoleApp:
         }
         model = self._display_to_tts_model(disp)
         self.tts_model_hint_var.set(hints.get(model, ""))
+        self._apply_tts_field_states(model)
+
+    def _apply_tts_field_states(self, model: str | None = None) -> None:
+        """按合成方式启用/禁用对应的输入项（审查报告 D3）。
+
+        此前三个框一直全开，voiceclone 下还能选音色，容易让人以为"克隆要先选音色"。
+        判断规则抽在 `core.tts.tts_field_states()` 里，GUI 与自检共用同一套说法。
+        """
+        if model is None:
+            model = self._display_to_tts_model(self.tts_model_var.get())
+        st = tts_field_states(model)
+        try:
+            self.voice_box.configure(state="normal" if st["voice_enabled"] else "disabled")
+            self.voice_label.configure(text=st["voice_label"])
+            self.voice_hint.configure(text=st["voice_hint"])
+
+            self.voice_instr_entry.configure(
+                state="normal" if st["instr_enabled"] else "disabled")
+            self.voice_instr_label.configure(text=st["instr_label"])
+            self.voice_instr_hint.configure(text=st["instr_hint"])
+
+            ref_state = "normal" if st["ref_enabled"] else "disabled"
+            for w in (self.ref_entry, self.btn_ref_browse, self.btn_ref_record,
+                      self.btn_ref_validate):
+                w.configure(state=ref_state)
+            self.ref_hint.configure(text=st["ref_hint"])
+        except Exception:  # noqa: BLE001 —— 界面尚未建好时静默跳过
+            pass
 
     def _display_to_tts_model(self, disp: str) -> str:
         for mid, d in self._tts_model_display.items():
@@ -1481,6 +1711,9 @@ class ConsoleApp:
             messagebox.showerror("保存失败", f"写入 config.json 时出错：\n{exc}")
             return
         self.cfg = load_config()
+        # 这是**另一条写盘路径**：不刷新快照的话，退出时会把已保存的声音设置误报成"未保存"
+        self._cfg_snapshot = self._ui_cfg_snapshot()
+        self._refresh_cfg_dirty_hint()
         self.worker.submit("reload")
         self._voice_feedback(True, f"声音设置已保存（{t['model']}），下一句对话生效")
         messagebox.showinfo("已保存", "声音设置已保存，下一句对话立即用新声音。")
@@ -1677,11 +1910,26 @@ class ConsoleApp:
             self.stats_box.configure(state="disabled")
 
     def _cleanup_expired(self) -> None:
-        """清理过期记忆。"""
+        """清理过期记忆。**批量永久删除、不可撤销**，所以先报数量再当面确认。"""
         try:
             mem = Memory(str(self.cfg["memory"]["db_path"]))
-            count = mem.cleanup_expired()
-            mem.close()
+            try:
+                n = mem.count_expired()
+                if n <= 0:
+                    messagebox.showinfo(
+                        "无需清理",
+                        "当前没有过期记忆。\n\n"
+                        "（只有设了过期时间的记忆才会过期；普通对话是永不过期的，"
+                        "想删就用列表里的「🗑 删除选中」。）")
+                    return
+                if not messagebox.askyesno(
+                        "清理过期记忆",
+                        f"将永久删除 {n} 条已过期的记忆，删除后无法恢复。\n\n确定清理吗？",
+                        icon="warning"):
+                    return
+                count = mem.cleanup_expired()
+            finally:
+                mem.close()
             messagebox.showinfo("清理完成", f"已清理 {count} 条过期记忆。")
             self._refresh_stats()
         except Exception as exc:
@@ -1819,6 +2067,21 @@ class ConsoleApp:
         if self.busy and not messagebox.askyesno(
                 "退出", "Fairy 正在回复中，退出将中断本轮对话。确定退出？"):
             return
+        # 防止"改了配置/人设却没保存"就退出，白改一场
+        changed = self._cfg_dirty_changes()
+        persona_dirty = self._persona_dirty()
+        if changed or persona_dirty:
+            parts = []
+            if changed:
+                shown = "、".join(changed[:8]) + ("…" if len(changed) > 8 else "")
+                parts.append(f"配置页有 {len(changed)} 项修改没保存：{shown}")
+            if persona_dirty:
+                parts.append("人设文本框里还有没点「保存人设」的修改")
+            if not messagebox.askyesno(
+                    "有未保存的修改",
+                    "\n".join(parts) + "\n\n现在退出会丢失这些修改。确定退出吗？",
+                    icon="warning"):
+                return
         # 桌宠与控制台同生共死：退出控制台时把桌宠一起关掉
         from core.pet import stop_pet
 
