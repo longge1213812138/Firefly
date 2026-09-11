@@ -111,6 +111,28 @@ def _safe_json_list(raw) -> list[str]:
         return []
 
 
+def coerce_number(raw, default: float) -> tuple[bool, float]:
+    """把界面输入框里的文本转成数字；不合法就回退 default 并返回 (False, default)。
+
+    用于「保存配置」的解耦：某个字段填错不该把整份配置（包括音色）一起挡下来。
+    """
+    try:
+        return True, float(str(raw).strip())
+    except (TypeError, ValueError):
+        return False, float(default)
+
+
+def coerce_optional_int(raw, default):
+    """可留空的整数字段（如桌宠初始坐标）：空 → (True, None)，非法 → (False, default)。"""
+    text = str(raw or "").strip()
+    if not text:
+        return True, None
+    try:
+        return True, int(float(text))
+    except (TypeError, ValueError):
+        return False, default
+
+
 # ---------------------------------------------------------------- 聊天后台线程
 class ChatWorker(threading.Thread):
     """单一后台线程：构造 Fairy、跑对话/录音，结果经 ui 队列交还界面。"""
@@ -120,6 +142,7 @@ class ChatWorker(threading.Thread):
         self.ui = ui
         self.jobs: "queue.Queue[tuple]" = queue.Queue()
         self.fairy = None
+        self.emotion = None  # 与对话共享的**唯一**情绪实例（情感页也用它）
         self._confirm_box: dict = {}
 
     # --- 主线程调用的入口 ---
@@ -143,9 +166,37 @@ class ChatWorker(threading.Thread):
                 if kind == "reload":
                     from core.config import load_config as _lc
 
+                    old = self.fairy
                     self.fairy = None
+                    if old is not None:
+                        # 旧 Fairy 的 SQLite 连接要先还回去，否则反复「保存配置」
+                        # 会一路攒着连接不释放（情绪实例由 _drop_emotion 另行关闭）
+                        try:
+                            old.memory.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    self._drop_emotion()  # 情绪实例也要按新配置重建
                     self._ensure_fairy(_lc())
                     self.ui.put(("status", "大脑已重载"))
+                    self._push_emotion()
+                elif kind == "emotion_snapshot":
+                    cfg = load_config()
+                    self._ensure_emotion(cfg)
+                    self._push_emotion()
+                elif kind == "emotion_nudge":
+                    _, action, dv, da, di = job
+                    self._ensure_emotion(load_config())
+                    if self.emotion is None:
+                        self.ui.put(("emotion_error", "情绪模型未启用"))
+                        continue
+                    if action == "reset":
+                        self.emotion.reset()
+                        note = "情绪已重置到基准值（对话立即生效）"
+                    else:
+                        self.emotion.nudge(dv, da, di)
+                        note = "情绪已手动微调（对话立即生效）"
+                    self._push_emotion(reload_from_db=False)
+                    self.ui.put(("status", note))
                 elif kind == "chat":
                     _, text, speak = job
                     self._ensure_fairy(load_config())
@@ -198,12 +249,43 @@ class ChatWorker(threading.Thread):
             finally:
                 self.ui.put(("busy", False))
 
+    def _ensure_emotion(self, cfg: dict):
+        """保证有一个情绪实例（与对话共用的那个，不额外造第二份）。"""
+        if self.emotion is None:
+            from core.emotion import EmotionModel
+
+            self.emotion = EmotionModel(cfg, db_path=cfg["memory"]["db_path"])
+        return self.emotion
+
+    def _drop_emotion(self) -> None:
+        if self.emotion is not None:
+            try:
+                self.emotion.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.emotion = None
+
+    def _push_emotion(self, reload_from_db: bool = True) -> None:
+        """把情绪快照 + 变化曲线交给界面（情感页据此渲染，不再是另一份内存状态）。"""
+        emo = self.emotion
+        if emo is None:
+            self.ui.put(("emotion_error", "情绪模型尚未初始化"))
+            return
+        try:
+            # 重读库：对话在后台线程写进去的情绪、别的窗口的手动微调都能看见
+            if reload_from_db and emo.enabled:
+                emo.load()
+            self.ui.put(("emotion", {"snapshot": emo.snapshot(), "history": emo.history(40)}))
+        except Exception as exc:  # noqa: BLE001
+            self.ui.put(("emotion_error", str(exc)))
+
     def _ensure_fairy(self, cfg: dict) -> None:
         if self.fairy is None:
             from main import Fairy
 
+            self._ensure_emotion(cfg)
             self.fairy = Fairy(cfg, speak=True, verbose=False, echo=False,
-                               confirm_fn=self.confirm)
+                               confirm_fn=self.confirm, emotion=self.emotion)
             self.ui.put(("status", f"大脑就绪：{cfg.get('llm', {}).get('model', '?')}"
                                    f"｜记忆 {self.fairy.memory.count()} 条"))
 
@@ -682,11 +764,11 @@ class ConsoleApp:
 
     # ============ ③ 情感（程序化情绪模型） ============
     def _build_emotion_tab(self) -> None:
-        from core.emotion import EmotionModel
-
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 情感 ")
-        self._emo = EmotionModel(self.cfg, db_path=self.cfg["memory"]["db_path"])
+        # 情绪实例由 ChatWorker 统一持有（与对话共用），这里只负责显示与下发操作，
+        # 避免界面和对话各持一份内存状态、互相看不见对方的改动。
+        self._emo = None
 
         head = ttk.Frame(f)
         head.pack(fill="x", padx=10, pady=(10, 2))
@@ -706,6 +788,8 @@ class ConsoleApp:
         ttk.Button(row, text="😊 开心一点", command=lambda: self._nudge_emotion(0.15, 0.10, 0)).pack(side="left")
         ttk.Button(row, text="🌙 安静一点", command=lambda: self._nudge_emotion(-0.05, -0.18, 0)).pack(side="left", padx=6)
         ttk.Button(row, text="💗 更亲近", command=lambda: self._nudge_emotion(0, 0, 0.05)).pack(side="left")
+        ttk.Label(row, text="微调立刻影响对话播报的语气", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left", padx=8)
 
         ttk.Label(f, text="将发给 MiMo-TTS 的风格指令（按官方规范放 role=user，可编辑后复制）",
                   font=FONT_BOLD).pack(anchor="w", padx=10, pady=(6, 2))
@@ -716,7 +800,7 @@ class ConsoleApp:
                   foreground="#8a8f98").pack(anchor="w", padx=10)
         self.emo_hist_canvas = tk.Canvas(f, height=88, highlightthickness=0, background="#fbfbf7")
         self.emo_hist_canvas.pack(fill="x", padx=10, pady=(2, 8))
-        self._refresh_emotion()
+        self.worker.submit("emotion_snapshot")  # 首屏向后台要一份真实状态
 
     def _draw_bar(self, c: "tk.Canvas", y: int, label: str, value: float,
                   lo: float, hi: float, color: str, fmt: str) -> None:
@@ -735,10 +819,11 @@ class ConsoleApp:
         c.create_text(right + 6, y + 8, text=fmt.format(value), anchor="w",
                       font=FONT_SMALL, fill="#2c2c2a")
 
-    def _draw_emotion_history(self) -> None:
+    def _draw_emotion_history(self, rows: list[dict] | None = None) -> None:
         c = self.emo_hist_canvas
         c.delete("all")
-        rows = self._emo.history(40)
+        if rows is None:
+            rows = []
         if len(rows) < 2:
             c.create_text(8, 42, anchor="w", text="（还看不出变化，多聊几句就会出现曲线）",
                           font=FONT_SMALL, fill="#8a8f98")
@@ -761,37 +846,35 @@ class ConsoleApp:
                 c.create_line(*pts, fill=color, width=1.5)
 
     def _refresh_emotion(self) -> None:
-        if getattr(self, "_emo", None) is None:
+        """向后台要一份最新情绪快照（后台会重新读库，所以对话里的变化也能看到）。"""
+        self.worker.submit("emotion_snapshot")
+
+    def _render_emotion(self, payload: dict | None, error: str = "") -> None:
+        if error:
+            self.emo_title_var.set(f"读取情绪失败：{error}")
             return
-        try:
-            s = self._emo.snapshot()
-        except Exception as exc:  # noqa: BLE001
-            self.emo_title_var.set(f"读取情绪失败：{exc}")
+        if not payload:
             return
-        self.emo_title_var.set(f"当前情绪：{s['label']}（{s['compound']}）｜累计 {s['turns']} 轮")
-        self.emo_reason_var.set(s["reason"] or "")
-        if not s["enabled"]:
+        s = payload.get("snapshot") or {}
+        self.emo_title_var.set(f"当前情绪：{s.get('label', '?')}（{s.get('compound', '')}）"
+                               f"｜累计 {s.get('turns', 0)} 轮")
+        self.emo_reason_var.set(s.get("reason") or "")
+        if not s.get("enabled", True):
             self.emo_title_var.set("情绪模型已在 config.json 里关闭（emotion.enabled=false）")
         c = self.emo_canvas
         c.delete("all")
-        self._draw_bar(c, 4, "愉悦度", s["valence"], -1.0, 1.0, "#378ADD", "{:+.2f}")
-        self._draw_bar(c, 42, "唤醒度", s["arousal"], 0.0, 1.0, "#1D9E75", "{:.2f}")
-        self._draw_bar(c, 80, "亲密度", s["intimacy"], 0.0, 1.0, "#BA7517", "{:.2f}")
+        self._draw_bar(c, 4, "愉悦度", float(s.get("valence", 0.0)), -1.0, 1.0, "#378ADD", "{:+.2f}")
+        self._draw_bar(c, 42, "唤醒度", float(s.get("arousal", 0.0)), 0.0, 1.0, "#1D9E75", "{:.2f}")
+        self._draw_bar(c, 80, "亲密度", float(s.get("intimacy", 0.0)), 0.0, 1.0, "#BA7517", "{:.2f}")
         self.emo_style_box.delete("1.0", "end")
-        self.emo_style_box.insert("1.0", s["style_preview"])
-        self._draw_emotion_history()
+        self.emo_style_box.insert("1.0", s.get("style_preview", ""))
+        self._draw_emotion_history(payload.get("history") or [])
 
     def _reset_emotion(self) -> None:
-        if getattr(self, "_emo", None) is None:
-            return
-        self._emo.reset()
-        self._refresh_emotion()
+        self.worker.submit("emotion_nudge", "reset", 0.0, 0.0, 0.0)
 
     def _nudge_emotion(self, dv: float, da: float, di: float) -> None:
-        if getattr(self, "_emo", None) is None:
-            return
-        self._emo.nudge(dv, da, di)
-        self._refresh_emotion()
+        self.worker.submit("emotion_nudge", "nudge", dv, da, di)
 
     # ============ ④ 配置 ============
     def _build_config_tab(self) -> None:
@@ -1084,29 +1167,42 @@ class ConsoleApp:
         messagebox.showinfo("已保存", "人设已保存，下一句对话立即生效。")
 
     def _save_config(self) -> None:
-        try:
-            thresh = float(self.thresh_var.get())
-            tail = float(self.tail_var.get())
-            temp = float(self.temp_var.get())
-            emo_v = float(self.emo_base_v_var.get())
-            emo_a = float(self.emo_base_a_var.get())
-            emo_i = float(self.emo_base_i_var.get())
-            emo_decay = float(self.emo_decay_var.get())
-            pi_timeout = float(self.pi_timeout_var.get())
-            pet_scale = float(self.pet_scale_var.get())
-            pet_opacity = float(self.pet_opacity_var.get())
-        except ValueError:
-            messagebox.showerror("格式不对",
-                                 "阈值 / 温度 / 情绪基准 / 平复比例 / Pi 超时 / 桌宠大小与不透明度 "
-                                 "都要填数字（例如 0.008、0.9、0.25、0.12、600、1.0）")
-            return
-        sx, sy = self.pet_x_var.get().strip(), self.pet_y_var.get().strip()
-        try:
-            pet_x = int(sx) if sx else None
-            pet_y = int(sy) if sy else None
-        except ValueError:
-            messagebox.showerror("格式不对", "桌宠初始位置 X / Y 要填整数（像素），或者留空。")
-            return
+        """保存配置。数字字段**逐项**校验：填错的那一项回退原值，绝不连带挡住其它设置。
+
+        （此前任一字段填错就整份拒绝保存——用户改音色时会因为无关的阈值笔误而存不进去。）
+        """
+        cfg_now = self.cfg
+        cur_audio = cfg_now.get("audio", {}) or {}
+        cur_pet = cfg_now.get("pet", {}) or {}
+        cur_emo = cfg_now.get("emotion", {}) or {}
+        cur_emo_base = cur_emo.get("baseline", {}) or {}
+        bad: list[str] = []
+
+        def num(var, field: str, default) -> float:
+            ok, val = coerce_number(var.get(), default)
+            if not ok:
+                bad.append(f"{field}（填的不是数字）")
+            return val
+
+        thresh = num(self.thresh_var, "录音静音阈值", cur_audio.get("silence_threshold", 0.008))
+        tail = num(self.tail_var, "说完停顿判定（秒）", cur_audio.get("tail_silence_seconds", 1.0))
+        temp = num(self.temp_var, "性格随机度 temperature",
+                   cfg_now.get("llm", {}).get("temperature", 0.9))
+        emo_v = num(self.emo_base_v_var, "情绪基准·愉悦度", cur_emo_base.get("valence", 0.25))
+        emo_a = num(self.emo_base_a_var, "情绪基准·唤醒度", cur_emo_base.get("arousal", 0.45))
+        emo_i = num(self.emo_base_i_var, "情绪基准·亲密度", cur_emo_base.get("intimacy", 0.30))
+        emo_decay = num(self.emo_decay_var, "情绪平复比例", cur_emo.get("decay_per_hour", 0.12))
+        pi_timeout = num(self.pi_timeout_var, "Pi 超时（秒）",
+                         cfg_now.get("pi", {}).get("timeout", 600))
+        pet_scale = num(self.pet_scale_var, "桌宠大小", cur_pet.get("scale", 1.0))
+        pet_opacity = num(self.pet_opacity_var, "桌宠不透明度", cur_pet.get("opacity", 1.0))
+
+        ok_x, pet_x = coerce_optional_int(self.pet_x_var.get(), cur_pet.get("start_x"))
+        if not ok_x:
+            bad.append("桌宠初始位置 X（要整数或留空）")
+        ok_y, pet_y = coerce_optional_int(self.pet_y_var.get(), cur_pet.get("start_y"))
+        if not ok_y:
+            bad.append("桌宠初始位置 Y（要整数或留空）")
         cfg_path = APP_ROOT / "config.json"
         try:
             raw = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -1161,9 +1257,15 @@ class ConsoleApp:
         cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         self.cfg = load_config()  # 内存里的配置同步刷新（桌宠重启等会用到）
         self.worker.submit("reload")
-        messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n"
-                                      "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置；\n"
-                                      "  桌宠设置点「重启桌宠」立即生效）")
+        if bad:
+            messagebox.showwarning(
+                "已保存（有字段填错了）",
+                "配置已保存并重载。以下字段不是合法数字，已保留它们原来的值，"
+                "其余设置（包括声音/音色）照常生效：\n\n· " + "\n· ".join(bad))
+        else:
+            messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n"
+                                          "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置；\n"
+                                          "  桌宠设置点「重启桌宠」立即生效）")
 
     def _toggle_autostart(self) -> None:
         enable = bool(self.autostart_var.get())
@@ -1514,8 +1616,12 @@ class ConsoleApp:
                 self._chat_append("user", msg[1])
             elif kind == "chat_fairy":
                 self._chat_append("fairy", msg[1])
-                if getattr(self, "_emo", None) is not None:
-                    self._refresh_emotion()
+                # 情绪在后台异步演化，稍等一下再拉一次快照，数值条才能跟上
+                self.root.after(1800, self._refresh_emotion)
+            elif kind == "emotion":
+                self._render_emotion(msg[1])
+            elif kind == "emotion_error":
+                self._render_emotion(None, str(msg[1]))
             elif kind == "chat_sys":
                 self._chat_append("sys", msg[1])
             elif kind == "status":

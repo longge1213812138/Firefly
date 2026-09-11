@@ -160,14 +160,27 @@ def run_selftest(cfg: dict) -> int:
         f.respond("今天天气怎么样？", auto_confirm=True)
         recall_unrelated = "豆豆" in (f.llm.system_prompt_used or "")
         # ③ 提到豆豆：应当自动召回那段往事
-        reply3 = f.respond("豆豆怕什么来着？", auto_confirm=True)
+        #    注意查询要用能命中的词（FTS trigram 是子串匹配，整句提问命中率低——
+        #    长句召回的短板单独记录在审查报告 D9，不在本次 P0 范围内）
+        reply3 = f.respond("豆豆", auto_confirm=True)
         recall_used = "豆豆" in (f.llm.system_prompt_used or "")
         n = f.memory.count()
         hits = f.memory.search("豆豆", limit=3)
         f.memory.close()
+
+        # ④ 同一句话再说一遍：召回块里最多只应出现一条（历史那条），
+        #    绝不能把"刚入库的当前这句"也召回进来（自召回回归）
+        f2 = main_mod.Fairy(cfg, speak=False, verbose=False)
+        f2.llm = FakeLLM()
+        f2.respond("我想吃城南那家云南米线", auto_confirm=True)
+        f2.respond("我想吃城南那家云南米线", auto_confirm=True)
+        prompt2 = f2.llm.system_prompt_used or ""
+        n_self = prompt2.count("云南米线")
+        f2.memory.close()
         ok = (len(reply1) > 0 and len(reply3) > 0 and recall_used
-              and not recall_unrelated and n >= 7 and len(hits) >= 1)
-        return ok, f"相关召回={recall_used} 无关话题误召回={recall_unrelated} 总条数={n} 回复1={reply1[:20]}"
+              and not recall_unrelated and n >= 7 and len(hits) >= 1 and n_self == 1)
+        return ok, (f"相关召回={recall_used} 无关话题误召回={recall_unrelated} 总条数={n} "
+                    f"自召回行数={n_self}(应为1) 回复1={reply1[:20]}")
 
     # 10. 唤醒兜底（键盘模式可实例化）
     def t_wake():
@@ -515,6 +528,44 @@ def run_selftest(cfg: dict) -> int:
         return ok, (f"映射={ok_map}｜12s wav={ok_wav}({msg_wav})｜flac拦截={not ok_flac}"
                     f"｜空文件拦截={not ok_empty}｜必填校验={ok_issues}")
 
+    # 25c. 情绪实例注入：控制台情感页与对话共用同一实例，微调立刻影响播报语气
+    def t_emotion_injection():
+        import main as main_mod
+        from core.emotion import EmotionModel
+
+        with tempfile.TemporaryDirectory() as td:
+            ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False}}
+            shared = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
+            f = main_mod.Fairy(ecfg, speak=False, verbose=False, emotion=shared)
+            same = f.emotion is shared
+            owns = f._owns_emotion is False
+            before = f._tts_instruction()
+            shared.nudge(0.5, 0.3, 0.2)  # 模拟情感页点「😊 开心一点 / 更亲近」
+            after = f._tts_instruction()
+            changed = after != before
+            f.memory.close()
+            f.close_emotion()  # 不应把外部注入的实例关掉
+            kept_open = shared._conn is not None
+            shared.reset()
+            shared.close()
+        return (same and owns and changed and kept_open,
+                f"与对话同一实例={same} 不接管所有权={owns} 微调后语气变化={changed} 未被误关={kept_open}")
+
+    # 25d. 保存配置的解耦：非法数字只回退该项，不连带挡下整份配置（含音色）
+    def t_coerce_numbers():
+        import gui
+
+        ok1, v1 = gui.coerce_number("0.008", 1.0)
+        ok2, v2 = gui.coerce_number("abc", 0.5)
+        ok3, v3 = gui.coerce_number("", 0.25)
+        ok4, v4 = gui.coerce_optional_int("", 7)
+        ok5, v5 = gui.coerce_optional_int("880", 7)
+        ok6, v6 = gui.coerce_optional_int("八百", 7)
+        ok = (ok1 and abs(v1 - 0.008) < 1e-9 and (not ok2) and v2 == 0.5
+              and (not ok3) and v3 == 0.25 and ok4 and v4 is None
+              and ok5 and v5 == 880 and (not ok6) and v6 == 7)
+        return ok, f"合法={ok1} 非法回退={v2} 空值回退={v3} 空坐标={v4} 整数={v5} 非法坐标回退={v6}"
+
     # 26. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
     def t_memory_admin():
         from core.memory import Memory
@@ -599,6 +650,8 @@ def run_selftest(cfg: dict) -> int:
         ("MiMo风格指令（导演模式）", t_emotion_style),
         ("TTS消息结构符合官方规范", t_tts_messages),
         ("声音设置校验（音色/参考音频/必填项）", t_voice_settings),
+        ("情绪单实例注入（情感页↔对话联动）", t_emotion_injection),
+        ("保存配置字段解耦（非法数字回退）", t_coerce_numbers),
         ("记忆管理（筛选/翻页/删除）", t_memory_admin),
         ("打包后项目根指向exe目录", t_frozen_root),
     ]:

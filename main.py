@@ -124,7 +124,7 @@ class _StreamSpeaker:
 
 class Fairy:
     def __init__(self, cfg: dict, speak: bool = True, verbose: bool = True,
-                 confirm_fn=None, echo: bool = True):
+                 confirm_fn=None, echo: bool = True, emotion=None):
         self.cfg = cfg
         self.speak = speak
         self.verbose = verbose
@@ -133,7 +133,11 @@ class Fairy:
         self.on_state = None          # 状态回调：idle/listening/thinking/speaking（桌宠用）
         self.persona = load_persona(cfg)
         self.memory = Memory(cfg["memory"]["db_path"])
-        self.emotion = EmotionModel(cfg, db_path=cfg["memory"]["db_path"])
+        # emotion 可由调用方注入（控制台里情感页与对话**共用同一个实例**，
+        # 否则两边各持一份内存状态，手动微调与实时演化会互相看不见）
+        self.emotion = (emotion if emotion is not None
+                        else EmotionModel(cfg, db_path=cfg["memory"]["db_path"]))
+        self._owns_emotion = emotion is None  # 外部注入的实例由注入方负责关闭
         self._last_scene = ""          # 最近一轮的情境描述，给 TTS 导演模式用
         self.stats = UsageStats(cfg.get("stats", {}).get("path", "data/stats.json"))
         self.stats.record_session()
@@ -141,6 +145,11 @@ class Fairy:
         self.asr = make_asr(cfg)
         self.tts = make_tts(cfg)
         self.session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+
+    def close_emotion(self) -> None:
+        """关闭情绪实例——只关自己创建的那份；外部注入的由注入方负责关闭。"""
+        if self.emotion is not None and getattr(self, "_owns_emotion", True):
+            self.emotion.close()
 
     def _set_state(self, s: str) -> None:
         if self.on_state:
@@ -180,15 +189,20 @@ class Fairy:
         return "\n".join(parts)
 
     def _prepare_messages(self, user_text: str) -> list[dict]:
-        """对话前的公共准备：记用户话、载人设、召回往事、拼上下文，返回 messages。"""
-        self.memory.add(self.session_id, "user", user_text)
+        """对话前的公共准备：载人设、召回往事、拼上下文，返回 messages。
+
+        顺序很重要：**先召回、再把用户这句话入库**。反过来做的话，刚写进去的这句话
+        会被自己的检索命中，在上下文的「往事」里重复出现一遍，挤占真实记忆的额度。
+        """
         self.stats.record_message("user")
         # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
         self.persona = load_persona(self.cfg)
         recall = self.memory.build_recall_block(
             user_text, top_k=int(self.cfg["memory"].get("recall_top_k", 5))
         )
+        self.memory.add(self.session_id, "user", user_text)
         self.llm.system_prompt = self._system_prompt(recall)
+        # 近 N 轮在入库之后取，这样模型能看到用户当前这句话
         history = self.memory.recent(
             self.session_id, limit=int(self.cfg["llm"].get("max_history_turns", 20))
         )
@@ -542,8 +556,7 @@ class Fairy:
         finally:
             waker.close()
             self.memory.close()
-            if self.emotion is not None:
-                self.emotion.close()
+            self.close_emotion()
 
     def run_text(self) -> None:
         self._maybe_start_pet()
@@ -574,8 +587,7 @@ class Fairy:
             if self.speak:
                 self.say(reply)
         self.memory.close()
-        if self.emotion is not None:
-            self.emotion.close()
+        self.close_emotion()
 
 
 def _is_exit(text: str) -> bool:
