@@ -143,6 +143,31 @@ class PiCliBackend:
             return ["cmd", "/c", *argv]
         return argv
 
+    def _kill_tree(self, proc: "subprocess.Popen") -> None:
+        """终止进程及其**整棵子进程树**，并回收僵尸进程。
+
+        为什么不能只 proc.kill()：Windows 上 pi 是 pi.cmd，被 `cmd /c` 包了一层；
+        proc.kill() 只杀最外层 cmd.exe，真正的 node 子进程会变成孤儿继续跑、
+        继续占 CPU/内存/管道句柄。多次超时后孤儿进程越攒越多，会拖垮后续的
+        大脑/语音请求（表现为"突然不能正常聊天了"）。
+        这里用系统自带 taskkill /T /F 把整棵树一起端掉；非 Windows 退回 kill。
+        """
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=10)
+            else:
+                proc.kill()
+        except Exception:  # noqa: BLE001 —— 兜底再试一次 kill
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            proc.wait(timeout=5)  # 等它真正退出，避免留下僵尸进程
+        except subprocess.TimeoutExpired:
+            pass
+
     # -------------------------------------------------- 执行
     def run(self, task: str, *, read_only: bool = False,
             timeout: float | None = None, cwd: str | None = None,
@@ -207,7 +232,7 @@ class PiCliBackend:
             proc.wait(timeout=max(1.0, timeout))
         except subprocess.TimeoutExpired:
             timed_out = True
-            proc.kill()
+            self._kill_tree(proc)   # 杀整棵树（Windows 下 kill 只杀得到 cmd.exe 外壳）
         t_out.join(timeout=5)
         t_err.join(timeout=5)
 

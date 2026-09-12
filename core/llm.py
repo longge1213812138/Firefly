@@ -8,6 +8,17 @@ from . import http as http_mod
 
 ACTION_RE = re.compile(r"^\s*ACTION:\s*(\{.*\})\s*$", re.MULTILINE)
 
+# 常见 HTTP 错误的人话解释（chat / chat_stream 共用，别让用户看到干巴巴的 "HTTP 500"）
+_HTTP_HINTS = {
+    401: "API Key 无效（401）：Key 错或已失效（小米 Token Plan 的 Key 是 tp- 开头）",
+    402: "账户余额不足（402）：Token Plan 未订阅或额度用尽",
+    404: "接口地址不对（404）：检查 base_url",
+    429: "请求太频繁（429）：稍等几十秒再试，或换个模型",
+    500: "服务端临时故障（500）：小米处理请求时自己崩了，稍后重试通常就好（多半不是你的配置问题）",
+    502: "服务端网关错误（502）：上游依赖故障，稍后重试",
+    503: "服务端过载或维护（503）：稍后重试",
+}
+
 
 class LLM:
     def __init__(self, llm_cfg: dict, system_prompt: str, timeout: int = 120):
@@ -41,12 +52,7 @@ class LLM:
             data=json.dumps(payload), timeout=self.timeout,
         )
         if r.status_code != 200:
-            hints = {
-                401: "API Key 无效（401）：config.json 里填的 Key 错或已失效（小米 Token Plan 的 Key 是 tp- 开头）",
-                402: "账户余额不足（402）：Token Plan 未订阅或额度用尽",
-                404: "接口地址不对（404）：检查 base_url",
-            }
-            hint = hints.get(r.status_code, f"HTTP {r.status_code}")
+            hint = _HTTP_HINTS.get(r.status_code, f"HTTP {r.status_code}")
             raise RuntimeError(f"大脑接口调用失败——{hint}｜原始返回：{r.text[:200]}")
         data = r.json()
         return (data["choices"][0]["message"]["content"] or "").strip()
@@ -78,7 +84,7 @@ class LLM:
             data=json.dumps(payload), stream=True, timeout=timeout,
         ) as r:
             if r.status_code != 200:
-                hint = f"HTTP {r.status_code}"
+                hint = _HTTP_HINTS.get(r.status_code, f"HTTP {r.status_code}")
                 raise RuntimeError(f"大脑接口调用失败——{hint}｜原始返回：{r.text[:200]}")
             for line in r.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data:"):

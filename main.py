@@ -517,6 +517,7 @@ class Fairy:
                     speaker.feed_delta(delta)
             except Exception:  # noqa: BLE001 —— 流式失败，回退非流式
                 speaker.cancel()
+                speaker.join(timeout=5)  # 等后台播报线程退干净，避免残留/抢麦
                 reply = self.llm.chat(messages)
                 text, acts = llm_mod.extract_actions(reply)
                 if acts:

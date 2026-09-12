@@ -286,6 +286,47 @@ def run_selftest(cfg: dict) -> int:
                 f"注册={names}｜只读带--tools={('--tools' in argv_ro)}｜"
                 f"可写不加--tools={('--tools' not in argv_rw)}｜可用={avail}")
 
+    # 15b. Pi 超时杀进程树：Windows 下必须 taskkill /T /F（否则只杀 cmd.exe，node 成孤儿）
+    def t_pi_kill_tree():
+        import os as _os
+        from unittest import mock
+
+        from core import agent_backend
+
+        b = agent_backend.get_backend("pi", cfg)
+        has = hasattr(b, "_kill_tree")
+        is_win = _os.name == "nt"
+
+        class FakeProc:
+            pid = 999999
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):  # noqa: ARG002
+                return 0
+
+        captured: dict = {}
+
+        def fake_run(argv, **kw):  # noqa: ARG001
+            captured["argv"] = list(argv)
+
+            class _R:
+                returncode = 1  # 模拟"找不到进程"
+            return _R()
+
+        if is_win:
+            with mock.patch.object(agent_backend.subprocess, "run", side_effect=fake_run):
+                b._kill_tree(FakeProc())
+            a = captured.get("argv", [])
+            ok_tree = ("taskkill" in a and "/T" in a and "/F" in a
+                       and str(FakeProc.pid) in a)
+        else:
+            ok_tree = True  # 非 Windows 直接 kill，不做 subprocess.run
+
+        return (has and ok_tree,
+                f"Windows={is_win} 杀树参数={captured.get('argv')}")
+
     # 16. pi_agent 是硬闸口：每次当面确认，自动流程绕不过
     def t_pi_safety():
         from core import actions, safety
@@ -398,6 +439,38 @@ def run_selftest(cfg: dict) -> int:
         with mock.patch.object(http_mod.session(), "post", return_value=FakeResp()):
             out = "".join(brain.chat_stream([{"role": "user", "content": "hi"}]))
         return out == "你好，我是流萤。", f"流式拼接={out!r}"
+
+    # 21b. 大脑错误友好提示：500 要说明是服务端临时故障，401 也要专属提示
+    def t_llm_hints():
+        from unittest import mock
+
+        from core import http as http_mod
+        from core import llm as llm_mod
+
+        brain = llm_mod.LLM({"api_key": "test", "base_url": "https://x.test",
+                             "model": "m"}, system_prompt="")
+
+        class FakeResp:
+            text = '{"error":{"code":"500","message":"Internal Server Error"}}'
+
+            def __init__(self, code):
+                self.status_code = code
+
+        with mock.patch.object(http_mod.session(), "post", return_value=FakeResp(500)):
+            try:
+                brain.chat([{"role": "user", "content": "hi"}])
+                err500 = "（未抛异常）"
+            except RuntimeError as e:
+                err500 = str(e)
+        with mock.patch.object(http_mod.session(), "post", return_value=FakeResp(401)):
+            try:
+                brain.chat([{"role": "user", "content": "hi"}])
+                err401 = "（未抛异常）"
+            except RuntimeError as e:
+                err401 = str(e)
+        ok = ("服务端临时故障" in err500 and "不是你的配置问题" in err500
+              and "API Key 无效" in err401)
+        return ok, f"500→{err500[:44]}｜401→{err401[:22]}"
 
     # 22. 情绪模型：词典推断 + 演化 + 边界钳制（离线，不调大模型）
     def t_emotion_model():
@@ -924,12 +997,14 @@ def run_selftest(cfg: dict) -> int:
         ("桌宠配置解析（缩放/透明度/位置钳制）", t_pet_options),
         ("GUI 模块（tkinter）", t_gui_module),
         ("外部agent后端注册与参数拼装", t_agent_backend),
+        ("Pi超时杀进程树（taskkill /T /F）", t_pi_kill_tree),
         ("pi_agent 硬闸口", t_pi_safety),
         ("pi_agent 参数校验", t_pi_args),
         ("删除文件真正可用（回归修复）", t_delete_file),
         ("对外接口单行JSON协议", t_api_protocol),
         ("流式分句器（切句+过滤ACTION）", t_sentence_buffer),
         ("LLM流式SSE解析（离线桩）", t_llm_stream),
+        ("大脑错误友好提示（500/401）", t_llm_hints),
         ("情绪模型演化与边界", t_emotion_model),
         ("情绪持久化（重启可读）", t_emotion_persist),
         ("MiMo风格指令（导演模式）", t_emotion_style),
