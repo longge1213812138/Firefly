@@ -48,7 +48,8 @@ try:
 except ImportError:
     HAS_TRAY = False
 
-from core.config import is_frozen, load_config, load_persona, resolve_root  # noqa: E402
+from core.config import (config_path, is_frozen, load_config,  # noqa: E402
+                         load_persona, resolve_root)
 
 # 打包成 exe 后，配置 / 数据 / 日志都要落在 exe 同级目录，而不是临时解包目录 _MEIPASS
 APP_ROOT = resolve_root()
@@ -211,6 +212,7 @@ class ChatWorker(threading.Thread):
                     f.speak = speak
                     f.confirm_fn = self.confirm
                     f.on_state = lambda s: self.ui.put(("pet_state", s))
+                    f.on_config_reload = lambda notes: self.ui.put(("reload_note", notes))
                     self.ui.put(("chat_user", text))
                     t0 = time.time()
                     if text.startswith("/pi"):
@@ -233,6 +235,7 @@ class ChatWorker(threading.Thread):
                     f.speak = speak
                     f.confirm_fn = self.confirm
                     f.on_state = lambda s: self.ui.put(("pet_state", s))
+                    f.on_config_reload = lambda notes: self.ui.put(("reload_note", notes))
                     self.ui.put(("status", "正在聆听…（说完停顿 1 秒自动结束）"))
                     text = f.listen()
                     if not text:
@@ -1531,7 +1534,7 @@ class ConsoleApp:
         ok_y, pet_y = coerce_optional_int(self.pet_y_var.get(), cur_pet.get("start_y"))
         if not ok_y:
             bad.append("桌宠初始位置 Y（要整数或留空）")
-        cfg_path = APP_ROOT / "config.json"
+        cfg_path = config_path()      # 配置在哪只由 core.config 说了算
         try:
             raw = json.loads(cfg_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
@@ -1700,7 +1703,7 @@ class ConsoleApp:
             self._voice_feedback(False, "保存失败：" + issues[0])
             messagebox.showerror("声音设置不完整", "请先解决以下问题再保存：\n\n· " + "\n· ".join(issues))
             return
-        cfg_path = APP_ROOT / "config.json"
+        cfg_path = config_path()      # 配置在哪只由 core.config 说了算
         try:
             raw = json.loads(cfg_path.read_text(encoding="utf-8"))
             raw.setdefault("tts", {})
@@ -2028,6 +2031,13 @@ class ConsoleApp:
                 self._chat_append("sys", msg[1])
             elif kind == "status":
                 self.status_var.set(msg[1])
+            elif kind == "reload_note":
+                # 配置热重载（D1）：状态栏闪一行，聊天区落一条 sys 留痕
+                notes = msg[1] if len(msg) > 1 else []
+                if notes:
+                    human = "｜".join(notes)
+                    self.status_var.set(f"⚙ 配置已热重载：{human}")
+                    self._chat_append("sys", f"⚙ 配置已热重载：{human}")
             elif kind == "busy":
                 self._set_busy(bool(msg[1]))
             elif kind == "confirm":

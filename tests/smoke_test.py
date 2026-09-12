@@ -757,6 +757,100 @@ def run_selftest(cfg: dict) -> int:
         ok = (n1 == 1 and n2 == 1 and removed == 1 and n3 == 0 and left == 2)
         return ok, (f"过期数={n1} 计数不动数据={n2 == n1} 清理={removed} 剩余={left}")
 
+    # 25l. D1：配置热重载——命令行模式改音色/模型不用重启程序
+    def t_config_hot_reload():
+        import copy as _copy
+        import json as _json
+
+        import main as main_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            cpath = Path(td) / "config.json"
+            data = _copy.deepcopy(cfg)
+            data["memory"]["db_path"] = str(Path(td) / "hr.db")
+            data["safety"]["audit_log"] = str(Path(td) / "hr.log")
+            data["stats"] = {"path": str(Path(td) / "hr_stats.json")}
+            data.setdefault("tts", {})
+            data["tts"]["model"] = "mimo-v2.5-tts"
+            data["tts"]["voice"] = "冰糖"
+            data["llm"]["temperature"] = 0.9
+
+            # 注意：交给 Fairy 的那份配置必须**另存一份对象**。
+            # 如果直接改传给 Fairy 的同一个 dict，f.cfg 会跟着一起变，
+            # 新旧配置比对就永远"没有差异"（这个坑踩过一次）。
+            cfg_a = _copy.deepcopy(data)
+            cpath.write_text(_json.dumps(cfg_a, ensure_ascii=False), encoding="utf-8")
+            f = main_mod.Fairy(cfg_a, speak=False, verbose=False, config_file=str(cpath))
+            v0 = f.tts.voice
+            same = f.reload_config_if_changed()            # 文件没动过 → 不该重载
+
+            cfg_b = _copy.deepcopy(data)
+            cfg_b["tts"]["voice"] = "苏打"                  # 模拟在控制台改完音色
+            cfg_b["llm"]["temperature"] = 0.5
+            cpath.write_text(_json.dumps(cfg_b, ensure_ascii=False), encoding="utf-8")
+            changes = f.reload_config_if_changed()
+            v1 = f.tts.voice
+            temp1 = f.cfg["llm"]["temperature"]
+            again = f.reload_config_if_changed()           # 再探一次 → 不该重复重载
+
+            # 情绪设置也要跟着变，但**不能把累积状态冲掉**（亲密度是长期聊出来的）
+            f.emotion.nudge(0.3, 0.2, 0.25)
+            keep = f.emotion.state.intimacy
+            cfg_c = _copy.deepcopy(data)
+            cfg_c["emotion"] = {"enabled": True, "infer_with_llm": False,
+                                "inject_to_context": False}
+            cpath.write_text(_json.dumps(cfg_c, ensure_ascii=False), encoding="utf-8")
+            f.reload_config_if_changed()
+            kept = abs(f.emotion.state.intimacy - keep) < 1e-9
+            inj = f.emotion.inject_to_context
+            f.memory.close()
+            f.close_emotion()
+
+        ok = (same == [] and len(changes) >= 2 and v0 == "冰糖" and v1 == "苏打"
+              and temp1 == 0.5 and again == [] and kept and inj is False)
+        return ok, (f"音色 {v0}→{v1}｜温度→{temp1}｜未改动时不重载={same == []}"
+                    f"｜重载项={len(changes)}｜不重复重载={again == []}"
+                    f"｜亲密度保留={kept}｜注入开关随配置关闭={inj is False}")
+
+    # 25m. D1 可见性：_notify_reload 在没变更时不刷屏，有变更时同时 print + 回调 GUI
+    def t_reload_visibility():
+        import contextlib
+        import copy as _copy2
+        import io
+        import json as _json2
+        import main as main_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            cpath = Path(td) / "config.json"
+            data = _copy2.deepcopy(cfg)
+            data["memory"]["db_path"] = str(Path(td) / "v.db")
+            data["safety"]["audit_log"] = str(Path(td) / "v.log")
+            data["stats"] = {"path": str(Path(td) / "v_stats.json")}
+            cpath.write_text(_json2.dumps(data, ensure_ascii=False), encoding="utf-8")
+            f = main_mod.Fairy(data, speak=False, verbose=True, echo=True,
+                               config_file=str(cpath))
+
+            # 1. 空列表必须真安静：捕 stdout 不能出现"配置已热重载"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                f._notify_reload([])
+            quiet = "配置已热重载" not in buf.getvalue()
+
+            # 2. 有变更时：往 on_reload_note 里写标志 + stdout 包含人话
+            seen: list[list[str]] = []
+            f.on_config_reload = lambda notes: seen.append(list(notes))
+            buf2 = io.StringIO()
+            with contextlib.redirect_stdout(buf2):
+                f._notify_reload(["音色 冰糖 → 苏打", "temperature 0.9 → 0.5"])
+            out = buf2.getvalue()
+            called = bool(seen) and "苏打" in seen[0][0]
+            printed = "苏打" in out and "0.5" in out and "配置已热重载" in out
+
+            f.memory.close()
+            f.close_emotion()
+        ok = quiet and called and printed
+        return ok, (f"空列表静默={quiet}｜回调触发={called}｜控制台打印={printed}")
+
     # 26. 记忆管理：筛选查询 / 计数 / 分类 / 翻页 / 删除
     def t_memory_admin():
         from core.memory import Memory
@@ -850,6 +944,8 @@ def run_selftest(cfg: dict) -> int:
         ("本轮上下文快照（P2-8 可视化数据）", t_context_snapshot),
         ("合成方式联动字段可用性（D3）", t_tts_field_states),
         ("过期记忆计数与清理（C1 清理前报数量）", t_memory_expired),
+        ("配置热重载（D1 改音色不用重启）", t_config_hot_reload),
+        ("热重载可见性（D1 print+回调）", t_reload_visibility),
         ("记忆管理（筛选/翻页/删除）", t_memory_admin),
         ("打包后项目根指向exe目录", t_frozen_root),
     ]:

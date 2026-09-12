@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import queue
 import re
 import sys
@@ -23,6 +24,7 @@ import threading
 import time
 import traceback
 import uuid
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -30,7 +32,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from core import actions, audio_io, llm as llm_mod, safety  # noqa: E402
 from core.asr import make_asr  # noqa: E402
-from core.config import load_config, load_persona  # noqa: E402
+from core.config import config_path, load_config, load_persona  # noqa: E402
 from core.emotion import EmotionModel  # noqa: E402
 from core.memory import Memory  # noqa: E402
 from core.sentence_buffer import SentenceBuffer  # noqa: E402
@@ -141,13 +143,15 @@ class _StreamSpeaker:
 
 class Fairy:
     def __init__(self, cfg: dict, speak: bool = True, verbose: bool = True,
-                 confirm_fn=None, echo: bool = True, emotion=None):
+                 confirm_fn=None, echo: bool = True, emotion=None,
+                 config_file: str | None = None):
         self.cfg = cfg
         self.speak = speak
         self.verbose = verbose
         self.echo = echo              # 是否把对话打印到控制台（GUI 模式关掉）
         self.confirm_fn = confirm_fn  # 危险操作确认回调（默认命令行 input；GUI 传弹窗）
         self.on_state = None          # 状态回调：idle/listening/thinking/speaking（桌宠用）
+        self.on_config_reload = None  # 配置被热重载时的回调（控制台据此在状态栏提示）
         self.persona = load_persona(cfg)
         self.memory = Memory(cfg["memory"]["db_path"])
         # emotion 可由调用方注入（控制台里情感页与对话**共用同一个实例**，
@@ -164,6 +168,115 @@ class Fairy:
         self.asr = make_asr(cfg)
         self.tts = make_tts(cfg)
         self.session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+        # 配置热重载（D1）：记住这次用的是哪个配置文件、内容指纹是什么
+        self._config_path = Path(config_file) if config_file else config_path()
+        self._cfg_fingerprint = self._read_cfg_fingerprint()
+
+    # ---------- 配置热重载（D1） ----------
+    def _read_cfg_fingerprint(self) -> str:
+        """config.json 的内容指纹（sha1）。用内容而不是 mtime：
+        mtime 在同秒内改写、或文件大小不变时会漏判，内容哈希永远准。"""
+        try:
+            return hashlib.sha1(self._config_path.read_bytes()).hexdigest()
+        except OSError:
+            return ""
+
+    def reload_config_if_changed(self, force: bool = False) -> list[str]:
+        """每轮对话前探一下 config.json；变了就地热重载，返回"改了什么"的人话列表。
+
+        解决 D1：命令行（--text）与语音模式启动时只读一次配置，
+        在控制台改完音色却以为"设置没生效"，非得重启程序才行。
+        """
+        if not force and self._read_cfg_fingerprint() == self._cfg_fingerprint:
+            return []
+        try:
+            new_cfg = load_config(self._config_path)
+        except Exception as exc:  # noqa: BLE001 —— 读坏了就继续用旧的，别把对话搞断
+            return [f"新配置读取失败，仍用旧配置（{exc}）"]
+        changes = self._apply_config(new_cfg)
+        self._cfg_fingerprint = self._read_cfg_fingerprint()
+        return changes
+
+    def _apply_config(self, new_cfg: dict) -> list[str]:
+        """把新配置应用到运行中的实例：重建 TTS/ASR/大脑、刷新人设与情绪设置。"""
+        old_cfg = self.cfg
+        changes = self._describe_cfg_changes(old_cfg, new_cfg)
+        self.cfg = new_cfg
+        self.persona = load_persona(new_cfg)
+        # 这三样都是"纯配置派生"的，直接重建最省心（下一轮才用到，不会打断本轮）
+        self.llm = llm_mod.make_llm(new_cfg, system_prompt=self.persona)
+        self.asr = make_asr(new_cfg)
+        self.tts = make_tts(new_cfg)
+        # 情绪**不能重建**：亲密度是长期聊出来的，重建会把累积状态抹掉
+        if self.emotion is not None:
+            try:
+                self.emotion.apply_config(new_cfg)
+            except Exception:  # noqa: BLE001
+                pass
+        old_db = (old_cfg.get("memory", {}) or {}).get("db_path")
+        new_db = (new_cfg.get("memory", {}) or {}).get("db_path")
+        if old_db != new_db:
+            try:
+                self.memory.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.memory = Memory(new_db)
+            changes.append("记忆库路径已切换")
+        return changes
+
+    # 热重载时要报给用户看的字段（人话名称 -> (配置段, 键)）。
+    # 只报用户"能感知到"的，不把 _说明/_字段 这类注释也算作变化。
+    _WATCH_FIELDS = (
+        ("合成方式", ("tts", "model")),
+        ("音色", ("tts", "voice")),
+        ("音色描述/风格指令", ("tts", "voice_instruction")),
+        ("参考音频", ("tts", "reference_audio_path")),
+        ("语音合成地址", ("tts", "base_url")),
+        ("大脑模型", ("llm", "model")),
+        ("大脑地址", ("llm", "base_url")),
+        ("性格随机度", ("llm", "temperature")),
+        ("携带对话轮数", ("llm", "max_history_turns")),
+        ("情绪开关", ("emotion", "enabled")),
+        ("情绪风格模式", ("emotion", "style_mode")),
+        ("情绪推断方式", ("emotion", "infer_with_llm")),
+        ("情绪注入上下文", ("emotion", "inject_to_context")),
+        ("情绪回复前预判", ("emotion", "pre_hint")),
+        ("每轮召回往事条数", ("memory", "recall_top_k")),
+        ("重要记忆常驻", ("memory", "pin_important")),
+        ("常驻记忆门槛", ("memory", "pin_min_importance")),
+        ("常驻记忆条数", ("memory", "pin_limit")),
+        ("唤醒词", ("wake", "keyword")),
+        ("录音静音阈值", ("audio", "silence_threshold")),
+        ("说完停顿判定", ("audio", "tail_silence_seconds")),
+        ("允许语音打断", ("audio", "barge_in")),
+        ("只读模式", ("pi", "read_only")),
+    )
+
+    def _describe_cfg_changes(self, old: dict, new: dict) -> list[str]:
+        def val(cfg: dict, sec: str, key: str):
+            return (cfg.get(sec) or {}).get(key)
+
+        out: list[str] = []
+        for label, (sec, key) in self._WATCH_FIELDS:
+            before, after = val(old, sec, key), val(new, sec, key)
+            if before != after:
+                out.append(f"{label} {self._fmt_cfg_val(before)} → {self._fmt_cfg_val(after)}")
+        # API Key 只报"换了没换"，绝不回显内容（安全）
+        old_key = val(old, "mimo", "api_key") or val(old, "tts", "api_key")
+        new_key = val(new, "mimo", "api_key") or val(new, "tts", "api_key")
+        if old_key != new_key:
+            out.append("API Key 已更新（内容不回显）")
+        if (old.get("persona_path") or "") != (new.get("persona_path") or ""):
+            out.append("人设文件路径已切换")
+        return out
+
+    @staticmethod
+    def _fmt_cfg_val(v) -> str:
+        if v is None or v == "":
+            return "（空）"
+        if isinstance(v, bool):
+            return "开" if v else "关"
+        return str(v)
 
     def close_emotion(self) -> None:
         """关闭情绪实例——只关自己创建的那份；外部注入的由注入方负责关闭。"""
@@ -180,6 +293,22 @@ class Fairy:
     def _say_line(self, text: str) -> None:
         if self.echo:
             print(text, flush=True)
+
+    def _notify_reload(self, notes: list[str]) -> None:
+        """把热重载的变更告诉用户：控制台/语音模式打印一行；
+        GUI 侧通过 on_config_reload 回调在状态栏显示。
+        真的没改任何东西就别刷屏（每轮都会探一次指纹）。
+        """
+        if not notes:
+            return
+        msg = "（配置已热重载：" + "；".join(notes) + "）"
+        self._say_line(msg)
+        cb = getattr(self, "on_config_reload", None)
+        if cb:
+            try:
+                cb(notes)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _tts_instruction(self) -> str:
         """拼出 role=user 的自然语言指令（按 MiMo 官方规范，指令放 user、正文放 assistant）。
@@ -256,6 +385,8 @@ class Fairy:
         2. **情绪预判要在拼 system prompt 之前**——否则本轮的心情注入的是上一轮的值。
         """
         self.stats.record_message("user")
+        # 配置热重载（D1）：改完音色/模型不必重启程序，本轮就用新的
+        self._notify_reload(self.reload_config_if_changed())
         # 人设每次重新读取：改 persona 文件立即生效（F-05 热切换）
         self.persona = load_persona(self.cfg)
         self._pre_emotion(user_text)   # P1-6：本轮语气先跟上
@@ -585,7 +716,8 @@ class Fairy:
             print("   → 注意：黑窗口被鼠标点过后会进入「标记模式」吞掉按键，按一下 Esc 可解除", flush=True)
             print("   → 想用真·语音唤醒「Hi Fairy」，请看 README 里的 3 步配置指引", flush=True)
 
-        print(f"   会话 ID：{self.session_id}｜历史记忆：{self.memory.count()} 条\n", flush=True)
+        print(f"   会话 ID：{self.session_id}｜历史记忆：{self.memory.count()} 条", flush=True)
+        print("   改了 config.json（音色/模型等）不用重启：下一句自动生效\n", flush=True)
 
         try:
             while True:
@@ -657,6 +789,8 @@ class Fairy:
         self._maybe_start_pet()
         print("\n【键盘模式】直接打字回车即可对话；输入 q 退出。", flush=True)
         print("   想让 Pi 帮忙：输入 /pi 任务（例如「/pi 帮我看看这个项目的结构」）", flush=True)
+        print("   改了 config.json（音色/模型等）不用重启：下一句会自动生效，"
+              "也可输入 /reload 立刻重载", flush=True)
         print(f"   会话 ID：{self.session_id}｜历史记忆：{self.memory.count()} 条\n", flush=True)
         while True:
             try:
@@ -667,6 +801,11 @@ class Fairy:
                 continue
             if user_text.lower() in ("q", "quit", "exit"):
                 break
+            if user_text.lower() in ("/reload", "/reload config"):
+                notes = self.reload_config_if_changed(force=True)
+                print("（已重载 config.json）" + ("\n  · " + "\n  · ".join(notes) if notes
+                                                else " 没有变化"), flush=True)
+                continue
             if user_text.startswith("/pi"):
                 t0 = time.time()
                 reply = self.run_pi_task(user_text[3:])

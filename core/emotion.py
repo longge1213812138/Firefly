@@ -107,6 +107,18 @@ class EmotionModel:
     """程序化情绪状态机：读/写 SQLite + 每轮更新 + 生成 MiMo 风格指令。"""
 
     def __init__(self, cfg: dict, db_path: str | None = None):
+        self.db_path = str(db_path or (cfg.get("memory", {}) or {}).get("db_path")
+                          or "data/memory.db")
+        self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()  # 保护跨线程写库（后台异步推断 + 主线程读取）
+        self._read_cfg(cfg)
+        self.state = EmotionState(**self.baseline)
+        if self.enabled:
+            self._init_schema()
+            self.load()
+
+    def _read_cfg(self, cfg: dict) -> None:
+        """把「配置驱动的属性」从 cfg 里读出来（构造与热重载共用同一处，避免两套默认值）。"""
         self.cfg = cfg or {}
         ecfg = dict(self.cfg.get("emotion", {}) or {})
         self.enabled = bool(ecfg.get("enabled", True))
@@ -123,12 +135,17 @@ class EmotionModel:
         base.update({k: float(v) for k, v in (ecfg.get("baseline") or {}).items()
                      if k in base})
         self.baseline = base
-        self.db_path = str(db_path or (self.cfg.get("memory", {}) or {}).get("db_path")
-                          or "data/memory.db")
-        self.state = EmotionState(**self.baseline)
-        self._conn: sqlite3.Connection | None = None
-        self._lock = threading.Lock()  # 保护跨线程写库（后台异步推断 + 主线程读取）
-        if self.enabled:
+
+    def apply_config(self, cfg: dict) -> None:
+        """热重载配置：只刷新"配置驱动的属性"，**保留当前情绪状态**（D1 用）。
+
+        注意不要重建实例——亲密度是长期聊出来的，重建（或 reset）会把它抹掉。
+        """
+        was_enabled = self.enabled
+        self.cfg = cfg or {}
+        self._read_cfg(cfg)
+        if self.enabled and not was_enabled:
+            # 从"关"变"开"：库表可能还没建、状态也没读过
             self._init_schema()
             self.load()
 

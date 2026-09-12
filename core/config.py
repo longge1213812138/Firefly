@@ -46,12 +46,18 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def config_path(root: str | os.PathLike | None = None,
+                path: str | os.PathLike | None = None) -> Path:
+    """解析「配置文件在哪」——只此一处，别在别处重算（load_config 与热重载共用）。"""
+    base = resolve_root(root)
+    p = Path(path) if path else base / "config.json"
+    return p if p.is_absolute() else base / p
+
+
 def load_config(path: str | os.PathLike | None = None,
                 root: str | os.PathLike | None = None) -> dict:
     base = resolve_root(root)
-    cfg_path = Path(path) if path else base / "config.json"
-    if not Path(cfg_path).is_absolute():
-        cfg_path = base / cfg_path
+    cfg_path = config_path(root, path)
 
     # 首次运行（常见于刚拿到 exe 时）：没有 config.json 就按模板生成一份，别直接崩
     if not Path(cfg_path).exists():
