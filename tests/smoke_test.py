@@ -138,7 +138,7 @@ def run_selftest(cfg: dict) -> int:
     def t_pipeline():
         import main as main_mod
 
-        f = main_mod.Fairy(cfg, speak=False, verbose=False)
+        f = main_mod.Firefly(cfg, speak=False, verbose=False)
 
         class FakeLLM:
             def __init__(self):
@@ -170,7 +170,7 @@ def run_selftest(cfg: dict) -> int:
 
         # ④ 同一句话再说一遍：召回块里最多只应出现一条（历史那条），
         #    绝不能把"刚入库的当前这句"也召回进来（自召回回归）
-        f2 = main_mod.Fairy(cfg, speak=False, verbose=False)
+        f2 = main_mod.Firefly(cfg, speak=False, verbose=False)
         f2.llm = FakeLLM()
         f2.respond("我想吃城南那家云南米线", auto_confirm=True)
         f2.respond("我想吃城南那家云南米线", auto_confirm=True)
@@ -238,7 +238,7 @@ def run_selftest(cfg: dict) -> int:
         idl = PetBrain("idle")
         idl.frame = 3
         return (keep and 0.0 <= g <= 1.0 and sp.mouth_open and not idl.mouth_open
-                and len(STATES) == 4), f"非法状态保持={keep} 呼吸={g:.2f} 口型={sp.mouth_open}"
+                and len(STATES) == 5), f"非法状态保持={keep} 呼吸={g:.2f} 口型={sp.mouth_open}"
 
     # 14. GUI 模块可导入（不弹窗口）
     def t_gui_module():
@@ -363,16 +363,16 @@ def run_selftest(cfg: dict) -> int:
         return (ok and gone and (not denied) and ("保护" in str(msg)),
                 f"临时文件已删除={gone}｜受保护目录拒删={not denied}")
 
-    # 19. 对外接口（fairy_api）单行 JSON 协议
+    # 19. 对外接口（firefly_api）单行 JSON 协议
     def t_api_protocol():
         import json as _json
         import subprocess as _sp
 
-        # 打包后没有 python 和 fairy_api.py，直接调用自己：`流萤.exe api ...`
+        # 打包后没有 python 和 firefly_api.py，直接调用自己：`流萤.exe api ...`
         if getattr(sys, "frozen", False):
             base, workdir = [sys.executable, "api"], str(Path(sys.executable).resolve().parent)
         else:
-            base, workdir = [sys.executable, "fairy_api.py"], str(_ROOT)
+            base, workdir = [sys.executable, "firefly_api.py"], str(_ROOT)
 
         tmp_cfg = tmp_dir / "selftest_config.json"
         tmp_cfg.write_text(_json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
@@ -609,7 +609,7 @@ def run_selftest(cfg: dict) -> int:
         with tempfile.TemporaryDirectory() as td:
             ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False}}
             shared = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
-            f = main_mod.Fairy(ecfg, speak=False, verbose=False, emotion=shared)
+            f = main_mod.Firefly(ecfg, speak=False, verbose=False, emotion=shared)
             same = f.emotion is shared
             owns = f._owns_emotion is False
             before = f._tts_instruction()
@@ -648,7 +648,7 @@ def run_selftest(cfg: dict) -> int:
             ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False,
                                        "inject_to_context": True}}
             emo = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
-            f = main_mod.Fairy(ecfg, speak=False, verbose=False, emotion=emo)
+            f = main_mod.Firefly(ecfg, speak=False, verbose=False, emotion=emo)
             emo.nudge(-0.7, -0.2, 0.0)          # 明显低落
             neg_prompt = f._system_prompt("")
             has_section = "【此刻的心情】" in neg_prompt
@@ -659,12 +659,12 @@ def run_selftest(cfg: dict) -> int:
             off_cfg = {**cfg, "emotion": {**ecfg["emotion"],
                                           "inject_to_context": False}}
             emo2 = EmotionModel(off_cfg, db_path=str(Path(td) / "e2.db"))
-            f2 = main_mod.Fairy(off_cfg, speak=False, verbose=False, emotion=emo2)
+            f2 = main_mod.Firefly(off_cfg, speak=False, verbose=False, emotion=emo2)
             off_prompt = f2._system_prompt("")
             f2.memory.close()
             # 情绪整体关闭 → 也不该出现
             no_cfg = {**cfg, "emotion": {"enabled": False}}
-            f3 = main_mod.Fairy(no_cfg, speak=False, verbose=False)
+            f3 = main_mod.Firefly(no_cfg, speak=False, verbose=False)
             no_prompt = f3._system_prompt("")
             f3.memory.close()
             f3.close_emotion()
@@ -724,7 +724,7 @@ def run_selftest(cfg: dict) -> int:
         with tempfile.TemporaryDirectory() as td:
             ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False}}
             emo = EmotionModel(ecfg, db_path=str(Path(td) / "e.db"))
-            f = main_mod.Fairy(ecfg, speak=False, verbose=False, emotion=emo)
+            f = main_mod.Firefly(ecfg, speak=False, verbose=False, emotion=emo)
             before = (emo.state.valence, emo.state.arousal)
             f.llm.system_prompt = ""
             # 只走"准备上下文"这一步（回复还没生成、轮末推断还没跑）
@@ -737,7 +737,7 @@ def run_selftest(cfg: dict) -> int:
             off_cfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False,
                                           "pre_hint": False}}
             emo2 = EmotionModel(off_cfg, db_path=str(Path(td) / "e2.db"))
-            f2 = main_mod.Fairy(off_cfg, speak=False, verbose=False, emotion=emo2)
+            f2 = main_mod.Firefly(off_cfg, speak=False, verbose=False, emotion=emo2)
             b2 = (emo2.state.valence, emo2.state.arousal)
             f2._prepare_messages("我今天特别累，什么都不想干")
             a2 = (emo2.state.valence, emo2.state.arousal)
@@ -756,7 +756,7 @@ def run_selftest(cfg: dict) -> int:
 
         with tempfile.TemporaryDirectory() as td:
             ecfg = {**cfg, "emotion": {"enabled": True, "infer_with_llm": False}}
-            f = main_mod.Fairy(ecfg, speak=False, verbose=False)
+            f = main_mod.Firefly(ecfg, speak=False, verbose=False)
 
             class FakeLLM:
                 def __init__(self):
@@ -848,12 +848,12 @@ def run_selftest(cfg: dict) -> int:
             data["tts"]["voice"] = "冰糖"
             data["llm"]["temperature"] = 0.9
 
-            # 注意：交给 Fairy 的那份配置必须**另存一份对象**。
-            # 如果直接改传给 Fairy 的同一个 dict，f.cfg 会跟着一起变，
+            # 注意：交给 Firefly 的那份配置必须**另存一份对象**。
+            # 如果直接改传给 Firefly 的同一个 dict，f.cfg 会跟着一起变，
             # 新旧配置比对就永远"没有差异"（这个坑踩过一次）。
             cfg_a = _copy.deepcopy(data)
             cpath.write_text(_json.dumps(cfg_a, ensure_ascii=False), encoding="utf-8")
-            f = main_mod.Fairy(cfg_a, speak=False, verbose=False, config_file=str(cpath))
+            f = main_mod.Firefly(cfg_a, speak=False, verbose=False, config_file=str(cpath))
             v0 = f.tts.voice
             same = f.reload_config_if_changed()            # 文件没动过 → 不该重载
 
@@ -900,7 +900,7 @@ def run_selftest(cfg: dict) -> int:
             data["safety"]["audit_log"] = str(Path(td) / "v.log")
             data["stats"] = {"path": str(Path(td) / "v_stats.json")}
             cpath.write_text(_json2.dumps(data, ensure_ascii=False), encoding="utf-8")
-            f = main_mod.Fairy(data, speak=False, verbose=True, echo=True,
+            f = main_mod.Firefly(data, speak=False, verbose=True, echo=True,
                                config_file=str(cpath))
 
             # 1. 空列表必须真安静：捕 stdout 不能出现"配置已热重载"
@@ -1026,7 +1026,7 @@ def run_selftest(cfg: dict) -> int:
     ]:
         check(name, fn)
 
-    print("\n=== Fairy MVP 自检结果 ===")
+    print("\n=== Firefly MVP 自检结果 ===")
     failed = 0
     for name, ok, detail in results:
         flag = "✅ 通过" if ok else "❌ 失败"

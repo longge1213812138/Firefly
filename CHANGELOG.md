@@ -1,4 +1,4 @@
-# CHANGELOG · Fairy（流萤）本地语音助手
+# CHANGELOG · Firefly（流萤）本地语音助手
 
 本地优先的语音私人助手，基于 Python 实现（MVP 阶段），情感陪伴 + 电脑操作 + 记忆系统。语音能力全部走小米 MiMo（ASR / TTS / LLM）。
 
@@ -52,11 +52,11 @@
   不重复重载 / 情绪设置跟着变但亲密度保留"以及"控制台 print + GUI 回调都生效"
 - 🧪 按 `tkinter-gui-smoke-test` 技能做了隔离 GUI 冒烟（11 项断言全过）：六个页面都能建、
   保存配置后不会误判为需要热重载、**在程序外面改 config.json 能被自动接住**、
-  热重载后情绪仍是同一实例、`on_config_reload` 真的被 ChatWorker 挂到 Fairy、
+  热重载后情绪仍是同一实例、`on_config_reload` 真的被 ChatWorker 挂到 Firefly、
   `reload_note` 事件落到状态栏 + 聊天区 sys 行、退出保护照旧
 
 **GUI 侧把热重载变得看得见**
-- `Fairy.on_config_reload` 回调：Fairy 热重载时把变更笔记回交给上层
+- `Firefly.on_config_reload` 回调：Firefly 热重载时把变更笔记回交给上层
 - `ChatWorker` 在 chat / voice_input 两条入口挂上回调 → 把变更塞进 ui 队列
 - 控制台侧 `_poll_ui` 新增 `reload_note` 事件：状态栏立刻闪「⚙ 配置已热重载：xxx」、
   聊天区同时落一条 sys 行（事后也能回看，这次到底改了啥）
@@ -132,7 +132,7 @@
   按【人设】【动作说明】【往事召回】【此刻心情】【近 N 轮对话】分块显示各自字数，
   并给出模型/温度/估算 token 数、情绪与往事到底注没注入的明确标记。
   这是唯一能让用户**亲眼确认**"情感/记忆注没注入"的手段；情感页也新增了「将注入大模型上下文的心情」预览框
-- ✅ 顺带对齐：`fairy_api.py` 的 `context` 接口同步补上心情段（和 `main.py` 的拼装规则保持一致，避免人格漂移）
+- ✅ 顺带对齐：`firefly_api.py` 的 `context` 接口同步补上心情段（和 `main.py` 的拼装规则保持一致，避免人格漂移）
 - 🧪 自检 **31 项 → 36 项**（新增：情绪注入上下文、召回重排与常驻、长问句拆词、情绪预判提前、
   本轮上下文快照），36/36 全绿；另做了两轮隔离 GUI 冒烟（配置页新控件 + 情感页预览 + 弹窗）
 
@@ -147,14 +147,14 @@
   - `core/tts.py` 抽出纯函数 `voice_choices` / `voice_display_for_id` / `voice_id_for_display` / `validate_reference_audio` / `tts_settings_issues`，界面与自检共用同一套校验
 - ✅ **模块联动 P0 修复（本轮）**：
   - **自召回 bug**：`main.py` 的 `_prepare_messages` 先写库再召回，导致用户刚说的这句话必然命中自己（模型会看到"你刚提到…"的自我复读）。现改为**先召回、再入库**
-  - **双情绪实例**：控制台情感页原来自建一份 `EmotionModel`，与对话用的那份互不相通——情感页微调不影响说话语气、对话演化也不更新数值条。现由 `ChatWorker` 只持有一份，注入给 `Fairy`（`emotion=` 参数 + `_owns_emotion` 生命周期管理），情感页通过后台快照读写，并**重读数据库**，两侧终于看的是同一个状态
+  - **双情绪实例**：控制台情感页原来自建一份 `EmotionModel`，与对话用的那份互不相通——情感页微调不影响说话语气、对话演化也不更新数值条。现由 `ChatWorker` 只持有一份，注入给 `Firefly`（`emotion=` 参数 + `_owns_emotion` 生命周期管理），情感页通过后台快照读写，并**重读数据库**，两侧终于看的是同一个状态
   - **保存配置耦合**：原先「保存配置」把所有数字字段塞进一个 `try/except float()`，任一字段填错（如阈值手滑）会导致**整份配置都存不进去**（含音色）。现改为逐字段解析（`coerce_number` / `coerce_optional_int`），非法值单独回退到原值并**事后提示**哪几项没生效，其余照常保存
-  - 附带修复：`reload`（保存配置后重载大脑）时旧 `Fairy` 的 SQLite 连接未关闭，反复保存会累积泄漏连接——现先 `close()` 再重建
+  - 附带修复：`reload`（保存配置后重载大脑）时旧 `Firefly` 的 SQLite 连接未关闭，反复保存会累积泄漏连接——现先 `close()` 再重建
 - 🧪 自检 **29 项 → 31 项**（新增：情绪单实例注入「情感页↔对话联动」、保存配置字段解构「非法数字回退」），31/31 全绿；另加强了「全链路对话」用例，断言自召回行数应为 1
 
 ### v0.5.0（三入口合一 + 语音回复提速）
 
-- ✅ **三入口整合成单 exe**：新增唯一入口 `fairy.py`，按参数分发四条分支——双击/无参数=图形控制台、`--pet`=桌宠、`--text`/`--selftest`/`--diag`/`--emotion`/`--stats` 等=对话与体检、`api <子命令>`=对外 JSON 接口。`build_exe.py` 由三 target 收敛为单 target，产物只剩一个 `流萤.exe`（体积从约 99 MB 降到约 35 MB）
+- ✅ **三入口整合成单 exe**：新增唯一入口 `firefly.py`，按参数分发四条分支——双击/无参数=图形控制台、`--pet`=桌宠、`--text`/`--selftest`/`--diag`/`--emotion`/`--stats` 等=对话与体检、`api <子命令>`=对外 JSON 接口。`build_exe.py` 由三 target 收敛为单 target，产物只剩一个 `流萤.exe`（体积从约 99 MB 降到约 35 MB）
 - ✅ **黑窗口隐藏**：新增 `core/winconsole.py`，用 `GetConsoleProcessList` 判定「控制台是否自己独占」（避免把用户自己的 cmd 一起藏掉），独占才 `SW_HIDE`；`--text` 等需要控制台的模式自然保留
 - ✅ **对外接口契约不变**：`流萤.exe api ping` 仍输出单行 JSON、退出码 0/1/2，可被外部程序用管道调用（自检项改为 `[sys.executable, "api", ...]`）
 - ✅ **语音回复大幅提速（中度优化）**：
@@ -176,8 +176,8 @@
 - ✅ **首次运行更友好**：找不到 `config.json` 时自动按 `config.example.json` 生成一份并提示填 Key（此前会直接抛异常）
 - ✅ 新增 `requirements.txt`；`.gitignore` 增加 `dist/`、`build/`、`*.spec`、`assets/*.ico`
 - 🐞 **修复（严重）**：`gui.py` 从头到尾**没有调用 `mainloop()`**，导致控制台窗口"建好就退"——`控制台.bat` 与打包后的 `流萤控制台.exe` 都会一闪而过。现已补上事件循环（开发环境与打包环境均实测窗口正常常驻）
-- 🔧 自检代码改为「冻结模式感知」：打包后不再 spawn `python fairy_api.py`（打包环境没有 python 与 .py 文件），改调同目录的 `流萤接口.exe`；也不再拿 `__file__` 推断项目根（打包后指向临时解包目录）——修复后**打包环境自检同样 25/25**
-- 🔧 `fairy_api.py ping` 的 `llm_configured` 判定更准确（小米系地址也要真的有 Key 才算可用）
+- 🔧 自检代码改为「冻结模式感知」：打包后不再 spawn `python firefly_api.py`（打包环境没有 python 与 .py 文件），改调同目录的 `流萤接口.exe`；也不再拿 `__file__` 推断项目根（打包后指向临时解包目录）——修复后**打包环境自检同样 25/25**
+- 🔧 `firefly_api.py ping` 的 `llm_configured` 判定更准确（小米系地址也要真的有 Key 才算可用）
 - 🧪 自检 **23 项 → 25 项**（新增：记忆管理筛选 / 翻页 / 删除、打包后项目根指向 exe 目录），25/25 全绿；GUI「记忆页 + 设置页」冒烟通过（含保存配置落盘校验、原有配置字段不丢失）
 
 ### v0.3.1（程序化情绪模型 + Pi 结果只存摘要）
@@ -199,11 +199,11 @@
 
 - ✅ **与 Pi 协作（可选，默认独立）**：陪伴端平时完全独立运行、不依赖 Pi；只有用户**明确要求**时才调用本机 `pi` 命令行。触发方式两种：对话里输入 `/pi <任务>`（键盘模式 / 控制台），或点名"用 Pi 帮我…"由模型按人设判断发出 `pi_agent` 动作
 - ✅ **出站扩展点** `core/agent_backend.py`：`AgentBackend` 可插拔注册表（`register_backend` / `get_backend` / `list_backends`）+ `PiCliBackend`（自动探测 CLI、拼装参数、带超时的子进程执行、逐行流式回调、Windows `pi.cmd` 适配）
-- ✅ **入站扩展点** `fairy_api.py`：给外部程序 / Pi 扩展调用的单行 JSON CLI（`ping` / `context` / `remember` / `say` / `search` / `persona` / `ask`），stdout 单行 JSON、日志走 stderr、退出码 0/1/2
+- ✅ **入站扩展点** `firefly_api.py`：给外部程序 / Pi 扩展调用的单行 JSON CLI（`ping` / `context` / `remember` / `say` / `search` / `persona` / `ask`），stdout 单行 JSON、日志走 stderr、退出码 0/1/2
 - ✅ **安全**：`pi_agent` 登记为**硬闸口**（每次必须当面确认，自动流程绕不过），并写入审计日志；`config.json` 的 `pi.read_only=true` 可只授予读类工具（`read,grep,find,ls`）
 - ✅ **记忆不共享**：长期记忆只在陪伴端；Pi 只是被调用方，其结果作为"笔记"记回流萤自己的记忆库
 - ✅ **修复**：`core/actions.py` 的 `_protected()` 引用了未导入的 `PROTECTED_PATHS`，导致 `delete_file` / `delete_dir` **从未真正执行过**（自检第 11 项因"失败即拦截"而误判通过）——已修复并新增回归用例
-- ✅ **解耦**：`core/config.py` 支持 `FAIRY_ROOT` 环境变量覆盖项目根（不设时行为不变）；`core/memory.py` 启用 WAL + busy_timeout，支持多进程并发访问
+- ✅ **解耦**：`core/config.py` 支持 `FIREFLY_ROOT` 环境变量覆盖项目根（不设时行为不变）；`core/memory.py` 启用 WAL + busy_timeout，支持多进程并发访问
 - ✅ 新增 `python main.py --pi-check` 外部 agent 体检
 - 🧪 自检 **14 项 → 19 项**，19/19 全绿；端到端实测（拒绝路径 / 只读任务）通过
 
@@ -228,11 +228,11 @@
 ### v0.1.0（MVP）
 
 - ✅ 记忆系统：SQLite 本地持久化 + 中文关键词检索（FTS5 trigram）+ 相关往事自动召回
-- ✅ 语音链路：唤醒（空格键兜底 + 可配 Picovoice「Hi Fairy」）→ MiMo-ASR → MiMo LLM → MiMo-TTS 播报
+- ✅ 语音链路：唤醒（空格键兜底 + 可配 Picovoice「Hi Firefly」）→ MiMo-ASR → MiMo LLM → MiMo-TTS 播报
 - ✅ 云端三关体检（`--diag`）与麦克风体检（`--mic-test`）
 - ✅ 电脑操作：只读/低风险直接执行，写文件/命令强制二次确认 + 本地审计日志
-- ✅ 云端兜底唤醒：识别到「Hi Fairy」即回应
-- ✅ 语音打断（barge-in）：Fairy 说话时直接插话，它立刻闭嘴并听你说
+- ✅ 云端兜底唤醒：识别到「Hi Firefly」即回应
+- ✅ 语音打断（barge-in）：Firefly 说话时直接插话，它立刻闭嘴并听你说
 - ✅ 蓝牙/声卡尾音截断修复（播放补静音垫底）
 - ✅ 一键脚本：启动 / 服务体检 / 麦克风体检 / 键盘对话 / 检索记忆
 
@@ -242,7 +242,7 @@
 
 | 短哈希 | 提交时间 | 提交说明 | 完整哈希 |
 | --- | --- | --- | --- |
-| ee54c7c | 2026-09-07 02:40:49 | init: Fairy 语音助手 MVP 首个版本 | ee54c7c957702ccf83db7644cee115bfc4ba21cd |
+| ee54c7c | 2026-09-07 02:40:49 | init: Firefly 语音助手 MVP 首个版本 | ee54c7c957702ccf83db7644cee115bfc4ba21cd |
 | 1f35caa | 2026-09-07 02:41:26 | chore: 添加 .gitattributes 保护批处理文件不被换行转换 | 1f35caa82713ff0123eabccf0e347435b2ace8d1 |
 | d993a1c | 2026-09-07 02:48:59 | feat: 新增语音打断(barge-in)，说话时可直接插话 | d993a1c7270dff04266b6e01a51c98ceddeee208 |
 | 99fe74e | 2026-09-07 03:21:57 | feat: v0.2.0 桌宠+GUI控制台+安全硬闸口与撤销清单+声线配置化 | 99fe74e078ffccdfc39dbbd79ff81d08a315e662 |

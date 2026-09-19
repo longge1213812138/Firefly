@@ -1,28 +1,28 @@
 @echo off
 cd /d "%~dp0"
-title Fairy ±¾µØÓïÒôÖúÊÖ
+title Firefly ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=C:\Users\91533\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 echo ==========================================
-echo    Fairy Á÷Ó© - ±¾µØÓïÒôÖúÊÖ
+echo    Firefly ï¿½ï¿½Ó© - ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 echo ==========================================
-echo Ê¹ÓÃµÄ Python: %PY%
+echo Ê¹ï¿½Ãµï¿½ Python: %PY%
 echo.
 "%PY%" main.py --diag
 echo.
-echo ÉÏÃæÈýÏî£¨ASR / TTS / LLM£©È«ÂÌ¼´¿ÉÕý³£¶Ô»°¡£
-echo ×Ô¼ìÖÐ...
+echo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î£¨ASR / TTS / LLMï¿½ï¿½È«ï¿½Ì¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô»ï¿½ï¿½ï¿½
+echo ï¿½Ô¼ï¿½ï¿½ï¿½...
 "%PY%" main.py --selftest
 if errorlevel 1 (
   echo.
-  echo [Ê§°Ü] ×Ô¼ìÎ´Í¨¹ý£¬Çë¿´ÉÏÃæµÄÊ§°ÜÏî¡£
+  echo [Ê§ï¿½ï¿½] ï¿½Ô¼ï¿½Î´Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ë¿´ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½ï¿½î¡£
   pause
   exit /b 1
 )
 echo.
-echo [¾ÍÐ÷] ½øÈë´ýÃü£º°´¿Õ¸ñËµ»°£¬°´ Q ÍË³ö¡£
+echo [ï¿½ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¸ï¿½Ëµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Q ï¿½Ë³ï¿½ï¿½ï¿½
 "%PY%" main.py
 echo.
-echo ³ÌÐòÒÑÍË³ö¡£
+echo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë³ï¿½ï¿½ï¿½
 pause

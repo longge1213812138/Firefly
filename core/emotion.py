@@ -373,9 +373,9 @@ class EmotionModel:
                 self.update_from_turn(user_text, reply_text)
             except Exception as exc:  # noqa: BLE001
                 import logging
-                logging.getLogger("fairy").warning("情绪后台更新失败：%s", exc)
+                logging.getLogger("firefly").warning("情绪后台更新失败：%s", exc)
 
-        threading.Thread(target=_job, daemon=True, name="fairy-emotion").start()
+        threading.Thread(target=_job, daemon=True, name="firefly-emotion").start()
 
     def pre_turn_hint(self, user_text: str) -> EmotionState:
         """回复生成**之前**的轻量预判：只用关键词词典，零成本、不调大模型。
@@ -503,7 +503,7 @@ class EmotionModel:
         """导演模式（官方推荐的高表现力写法：角色 / 场景 / 指导）。"""
         s = self.state
         persona_line = (self.cfg.get("_emotion_persona") or
-                        "流萤（Fairy），用户的本地语音陪伴助手；温柔真诚、有分寸感，"
+                        "流萤（Firefly），用户的本地语音陪伴助手；温柔真诚、有分寸感，"
                         "像认识很久的老朋友，不说客套话。")
         scene_line = scene or "在日常对话里回应对方。"
         guides = "\n".join(f"- {g}" for g in self._guidance())

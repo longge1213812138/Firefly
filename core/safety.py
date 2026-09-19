@@ -17,6 +17,7 @@ from pathlib import Path
 
 # 硬闸口动作：本质不可逆/外发，永远需要当面确认
 # pi_agent 会驱动外部 agent 读写文件、执行命令，效果等价于不可逆操作，故列为硬闸口
+# 注意：harness 异步执行模式同样受此约束——任务提交前必须通过确认，无法绕过
 HARD_ACTIONS = {"delete_file", "delete_dir", "send_file", "send_message", "pi_agent"}
 # 命令行中出现这些词 → 硬闸口
 HARD_CMD_KEYWORDS = (

@@ -645,7 +645,7 @@ CREATE TABLE relations (
     def get_recent_context(self, session_id, n=8) -> str:
         """获取最近 N 轮对话原文"""
         recent = self.recent(session_id, limit=n)
-        return "\n".join(f"{'用户' if r['role']=='user' else 'Fairy'}: {r['content']}"
+        return "\n".join(f"{'用户' if r['role']=='user' else 'Firefly'}: {r['content']}"
                         for r in recent)</code></pre>
 
 <h3>Step 2：新增自动摘要模块</h3>
@@ -669,7 +669,7 @@ CREATE TABLE relations (
         prompt += "\n".join(f"{m['role']}: {m['content']}" for m in messages[-20:])
         return self.llm.chat([{"role": "user", "content": prompt}])</code></pre>
 
-<h3>Step 3：修改 Fairy.respond() — 集成三层记忆</h3>
+<h3>Step 3：修改 Firefly.respond() — 集成三层记忆</h3>
 <pre><code>def respond(self, user_text: str) -> str:
     self._set_state("thinking")
     try:
@@ -793,7 +793,7 @@ CREATE TABLE relations (
 <div class="card">
 <h3>第一期（1-2 天）：缓冲 + 摘要</h3>
 <ul>
-    <li>✅ 修改 <code>Fairy.respond()</code>，将最近 8 轮原文注入 Prompt</li>
+    <li>✅ 修改 <code>Firefly.respond()</code>，将最近 8 轮原文注入 Prompt</li>
     <li>✅ 实现 <code>SessionSummarizer</code>，每 10 轮自动压缩</li>
     <li>✅ 优化 <code>build_recall_block()</code> 的融合排序算法</li>
     <li>✅ 添加时间衰减和重要度加权</li>

@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-title 流萤 Fairy - 控制台
+title 流萤 Firefly - 控制台
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=D://Python313//python.exe"
 if not exist "%PY%" set "PY=python"

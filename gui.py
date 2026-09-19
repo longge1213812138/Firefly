@@ -63,7 +63,7 @@ FONT = ("Microsoft YaHei UI", 10)
 FONT_BOLD = ("Microsoft YaHei UI", 10, "bold")
 FONT_SMALL = ("Microsoft YaHei UI", 9)
 
-AUTOSTART_NAME = "流萤Fairy助手.bat"
+AUTOSTART_NAME = "流萤Firefly助手.bat"
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -136,13 +136,13 @@ def coerce_optional_int(raw, default):
 
 # ---------------------------------------------------------------- 聊天后台线程
 class ChatWorker(threading.Thread):
-    """单一后台线程：构造 Fairy、跑对话/录音，结果经 ui 队列交还界面。"""
+    """单一后台线程：构造 Firefly、跑对话/录音，结果经 ui 队列交还界面。"""
 
     def __init__(self, ui: "queue.Queue"):
-        super().__init__(daemon=True, name="fairy-gui-chat")
+        super().__init__(daemon=True, name="firefly-gui-chat")
         self.ui = ui
         self.jobs: "queue.Queue[tuple]" = queue.Queue()
-        self.fairy = None
+        self.firefly = None
         self.emotion = None  # 与对话共享的**唯一**情绪实例（情感页也用它）
         self._confirm_box: dict = {}
 
@@ -167,17 +167,17 @@ class ChatWorker(threading.Thread):
                 if kind == "reload":
                     from core.config import load_config as _lc
 
-                    old = self.fairy
-                    self.fairy = None
+                    old = self.firefly
+                    self.firefly = None
                     if old is not None:
-                        # 旧 Fairy 的 SQLite 连接要先还回去，否则反复「保存配置」
+                        # 旧 Firefly 的 SQLite 连接要先还回去，否则反复「保存配置」
                         # 会一路攒着连接不释放（情绪实例由 _drop_emotion 另行关闭）
                         try:
                             old.memory.close()
                         except Exception:  # noqa: BLE001
                             pass
                     self._drop_emotion()  # 情绪实例也要按新配置重建
-                    self._ensure_fairy(_lc())
+                    self._ensure_firefly(_lc())
                     self.ui.put(("status", "大脑已重载"))
                     self._push_emotion()
                 elif kind == "emotion_snapshot":
@@ -199,15 +199,15 @@ class ChatWorker(threading.Thread):
                     self._push_emotion(reload_from_db=False)
                     self.ui.put(("status", note))
                 elif kind == "context":
-                    # 只看不发：不主动创建 Fairy（免得"还没聊过"就白开一个会话）
-                    if self.fairy is None:
+                    # 只看不发：不主动创建 Firefly（免得"还没聊过"就白开一个会话）
+                    if self.firefly is None:
                         self.ui.put(("context", {"empty": True}))
                     else:
-                        self.ui.put(("context", dict(self.fairy.last_context or {})))
+                        self.ui.put(("context", dict(self.firefly.last_context or {})))
                 elif kind == "chat":
                     _, text, speak = job
-                    self._ensure_fairy(load_config())
-                    f = self.fairy
+                    self._ensure_firefly(load_config())
+                    f = self.firefly
                     f.echo = False
                     f.speak = speak
                     f.confirm_fn = self.confirm
@@ -216,12 +216,15 @@ class ChatWorker(threading.Thread):
                     self.ui.put(("chat_user", text))
                     t0 = time.time()
                     if text.startswith("/pi"):
-                        self.ui.put(("status", "正在调用 Pi…（长任务可能几分钟，请稍候）"))
-                        reply = f.run_pi_task(text[3:])
+                        if not f.cfg.get("pi", {}).get("enabled", True):
+                            reply = "Pi 功能已关闭。请到「配置」页打开「允许 /pi 调用」后重试。"
+                        else:
+                            self.ui.put(("status", "正在调用 Pi…（长任务可能几分钟，请稍候）"))
+                            reply = f.run_pi_task(text[3:])
                     else:
                         self.ui.put(("status", "思考中…"))
                         reply = f.respond(text)
-                    self.ui.put(("chat_fairy", f"{reply}"))
+                    self.ui.put(("chat_firefly", f"{reply}"))
                     # 语音播报（与 main.py 的 run_text / run_voice 对齐）
                     if speak and reply:
                         self.ui.put(("status", "播报中…"))
@@ -229,8 +232,8 @@ class ChatWorker(threading.Thread):
                     self.ui.put(("status", f"就绪｜本轮 {time.time()-t0:.1f}s"))
                 elif kind == "voice_input":
                     (_, speak) = job
-                    self._ensure_fairy(load_config())
-                    f = self.fairy
+                    self._ensure_firefly(load_config())
+                    f = self.firefly
                     f.echo = False
                     f.speak = speak
                     f.confirm_fn = self.confirm
@@ -246,7 +249,7 @@ class ChatWorker(threading.Thread):
                     self.ui.put(("status", "思考中…"))
                     t0 = time.time()
                     reply = f.respond(text)
-                    self.ui.put(("chat_fairy", reply))
+                    self.ui.put(("chat_firefly", reply))
                     # 语音播报（与 main.py 的 run_text / run_voice 对齐）
                     if speak and reply:
                         self.ui.put(("status", "播报中…"))
@@ -288,15 +291,15 @@ class ChatWorker(threading.Thread):
         except Exception as exc:  # noqa: BLE001
             self.ui.put(("emotion_error", str(exc)))
 
-    def _ensure_fairy(self, cfg: dict) -> None:
-        if self.fairy is None:
-            from main import Fairy
+    def _ensure_firefly(self, cfg: dict) -> None:
+        if self.firefly is None:
+            from main import Firefly
 
             self._ensure_emotion(cfg)
-            self.fairy = Fairy(cfg, speak=True, verbose=False, echo=False,
+            self.firefly = Firefly(cfg, speak=True, verbose=False, echo=False,
                                confirm_fn=self.confirm, emotion=self.emotion)
             self.ui.put(("status", f"大脑就绪：{cfg.get('llm', {}).get('model', '?')}"
-                                   f"｜记忆 {self.fairy.memory.count()} 条"))
+                                   f"｜记忆 {self.firefly.memory.count()} 条"))
 
 
 # ---------------------------------------------------------------- 主界面
@@ -401,7 +404,7 @@ class ConsoleApp:
                 time.sleep(1.2)
             q.put("idle")
 
-        threading.Thread(target=work, daemon=True, name="fairy-pet-preview").start()
+        threading.Thread(target=work, daemon=True, name="firefly-pet-preview").start()
         self.status_var.set("桌宠正在演示四种状态……")
 
     # ============ ① 对话 ============
@@ -414,14 +417,18 @@ class ConsoleApp:
         self.chat_box.pack(fill="both", expand=True, padx=8, pady=(8, 4))
         for tag, color, kw in (
             ("user", "#2b5fb8", {}),
-            ("fairy", "#1f7a3d", {}),
+            ("firefly", "#1f7a3d", {}),
             ("sys", "#8a8f98", {"font": FONT_SMALL}),
         ):
             self.chat_box.tag_configure(tag, foreground=color, **kw)
-        self._chat_append("sys", "这里是和 Fairy 聊天的地方（与语音模式共用同一份记忆）。"
+        self._chat_append("sys", "这里是和 Firefly 聊天的地方（与语音模式共用同一份记忆）。"
                                  "涉及删除/覆盖/外发的操作会先弹窗让你确认。\n"
                                  "想让 Pi 帮忙：输入「/pi 任务」，例如「/pi 帮我看看这个项目的结构」"
                                  "（只在明确要求时调用，且每次都会弹窗确认）。\n")
+
+        # 任务状态面板（可折叠）
+        self._task_panel_visible = tk.BooleanVar(value=False)
+        self._build_task_panel(f)
 
         row = ttk.Frame(f)
         row.pack(fill="x", padx=8, pady=(2, 2))
@@ -433,6 +440,8 @@ class ConsoleApp:
         self.btn_clear.pack(side="right", padx=(0, 8))
         self.btn_ctx = ttk.Button(row, text="🔍 本轮上下文", command=self._show_context_click)
         self.btn_ctx.pack(side="right", padx=(0, 8))
+        self.btn_tasks = ttk.Button(row, text="📋 任务面板", command=self._toggle_task_panel)
+        self.btn_tasks.pack(side="right", padx=(0, 8))
 
         row2 = ttk.Frame(f)
         row2.pack(fill="x", padx=8, pady=(2, 8))
@@ -446,8 +455,62 @@ class ConsoleApp:
         ttk.Label(self.root, textvariable=self.status_var, font=FONT_SMALL,
                   foreground="#6b7280", anchor="w").pack(fill="x", padx=12, pady=(0, 6))
 
+    def _build_task_panel(self, parent: ttk.Frame) -> None:
+        """构建任务状态面板（初始隐藏）。"""
+        self._task_frame = ttk.LabelFrame(parent, text="📋 任务状态", padding=(8, 4))
+        # 初始不 pack，等用户点击按钮时再显示
+
+        # 任务列表
+        self._task_list_var = tk.StringVar(value="暂无任务")
+        self._task_list_label = ttk.Label(self._task_frame, textvariable=self._task_list_var,
+                                          font=FONT_SMALL, justify="left", wraplength=600)
+        self._task_list_label.pack(fill="x", padx=4, pady=4)
+
+        # 操作按钮行
+        btn_row = ttk.Frame(self._task_frame)
+        btn_row.pack(fill="x", padx=4, pady=(0, 4))
+        ttk.Button(btn_row, text="刷新", command=self._refresh_tasks).pack(side="left")
+        ttk.Button(btn_row, text="取消全部", command=self._cancel_all_tasks).pack(side="left", padx=(8, 0))
+
+    def _toggle_task_panel(self) -> None:
+        """切换任务面板显示/隐藏。"""
+        if self._task_panel_visible.get():
+            self._task_frame.pack_forget()
+            self._task_panel_visible.set(False)
+        else:
+            self._task_frame.pack(fill="x", padx=8, pady=(4, 2), before=self.chat_box.master.winfo_children()[1]
+                                  if len(self.chat_box.master.winfo_children()) > 1 else None)
+            self._task_panel_visible.set(True)
+            self._refresh_tasks()
+
+    def _refresh_tasks(self) -> None:
+        """刷新任务列表显示。"""
+        try:
+            from core.harness_middleware import format_task_list
+            tasks = self.worker.firefly.list_tasks() if hasattr(self.worker, 'firefly') else []
+            if tasks:
+                from core.harness_middleware import format_task_list
+                self._task_list_var.set(format_task_list(tasks))
+            else:
+                self._task_list_var.set("暂无任务")
+        except Exception as exc:
+            self._task_list_var.set(f"刷新失败：{exc}")
+
+    def _cancel_all_tasks(self) -> None:
+        """取消所有任务。"""
+        if not messagebox.askyesno("确认", "确定要取消所有任务吗？"):
+            return
+        try:
+            tasks = self.worker.firefly.list_tasks() if hasattr(self.worker, 'firefly') else []
+            for t in tasks:
+                if t.get('state') in ('pending', 'running'):
+                    self.worker.firefly.cancel_task(t.get('id', ''))
+            self._refresh_tasks()
+        except Exception as exc:
+            messagebox.showerror("错误", f"取消失败：{exc}")
+
     def _chat_append(self, who: str, text: str) -> None:
-        prefix = {"user": "你：", "fairy": "Fairy：", "sys": "· "}[who]
+        prefix = {"user": "你：", "firefly": "Firefly：", "sys": "· "}[who]
         ts = datetime.now().strftime("%H:%M")
         self.chat_box.configure(state="normal")
         self.chat_box.insert("end", f"[{ts}] ", "sys")
@@ -541,7 +604,7 @@ class ConsoleApp:
 
         add(f"【近 {payload.get('history_turns', 0)} 轮对话】\n", "h")
         for m in payload.get("history", []) or []:
-            who = "你" if m.get("role") == "user" else "Fairy"
+            who = "你" if m.get("role") == "user" else "Firefly"
             add(f"  {who}：{m.get('content', '')}\n")
         box.configure(state="disabled")
         box.yview_moveto(0)
@@ -685,7 +748,7 @@ class ConsoleApp:
             self.mem_tree.delete(*self.mem_tree.get_children())
             for r in rows:
                 ts = time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))
-                who = "你" if r["role"] == "user" else "Fairy"
+                who = "你" if r["role"] == "user" else "Firefly"
                 tags = _safe_json_list(r.get("tags"))
                 body = str(r["content"]).replace("\n", " ")
                 if tags:
@@ -739,7 +802,7 @@ class ConsoleApp:
         if not row:
             return
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["ts"]))
-        who = "你" if row["role"] == "user" else "Fairy"
+        who = "你" if row["role"] == "user" else "Firefly"
         tags = _safe_json_list(row["tags"])
         head = (f"#{mid}　{ts}　{who}　分类：{row['category'] or '对话'}　"
                 f"重要度：{row['importance']}　标签：{', '.join(tags) or '无'}\n"
@@ -799,7 +862,7 @@ class ConsoleApp:
         cat = self.mem_cat_var.get().strip()
         path = filedialog.asksaveasfilename(
             title="导出记忆", defaultextension=f".{fmt}",
-            initialfile=f"fairy_memory.{fmt}",
+            initialfile=f"firefly_memory.{fmt}",
             filetypes=[("JSON", "*.json")] if fmt == "json" else [("CSV", "*.csv")])
         if not path:
             return
@@ -1121,7 +1184,7 @@ class ConsoleApp:
         mimo = self.cfg.get("mimo", {})
         llm = self.cfg.get("llm", {})
 
-        # API Key（掩码：不回显明文）
+        # API Key（掩码：不回显明文）+ 独立保存按钮
         label("API Key（小米 tp-…）", font=FONT)
         self.key_var = tk.StringVar(value="")  # 安全：绝不回显已存的 Key
         ttk.Entry(wrap, textvariable=self.key_var, width=46, show="•").grid(
@@ -1129,6 +1192,13 @@ class ConsoleApp:
         has_key = "已配置 ✓（输入新值可更换，留空保持不变）" if mimo.get("api_key") else "尚未配置"
         ttk.Label(wrap, text=has_key, font=FONT_SMALL, foreground="#8a8f98").grid(
             row=row["n"], column=2, sticky="w", padx=6)
+        key_btn_frame = ttk.Frame(wrap)
+        key_btn_frame.grid(row=next_row(), column=1, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Button(key_btn_frame, text="💾 保存 API Key",
+                   command=self._save_api_key).pack(side="left")
+        self.key_status_var = tk.StringVar(value="")
+        ttk.Label(key_btn_frame, textvariable=self.key_status_var,
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
 
         label("大脑模型", font=FONT)
         self.model_var = tk.StringVar(value=llm.get("model", "mimo-v2.5"))
@@ -1140,6 +1210,13 @@ class ConsoleApp:
         self.baseurl_var = tk.StringVar(value=llm.get("base_url", ""))
         ttk.Entry(wrap, textvariable=self.baseurl_var, width=46).grid(
             row=row["n"], column=1, sticky="w", pady=3)
+        llm_btn_frame = ttk.Frame(wrap)
+        llm_btn_frame.grid(row=next_row(), column=1, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Button(llm_btn_frame, text="💾 保存模型/接口",
+                   command=self._save_llm_settings).pack(side="left")
+        self.llm_status_var = tk.StringVar(value="")
+        ttk.Label(llm_btn_frame, textvariable=self.llm_status_var,
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
 
         # ---------- 声音设置（MiMo TTS，对齐官方文档） ----------
         vbox = ttk.LabelFrame(wrap, text=" 声音设置（小米 MiMo 语音合成） ")
@@ -1231,7 +1308,7 @@ class ConsoleApp:
                   foreground="#8a8f98").grid(row=row["n"], column=2, sticky="w", padx=6)
 
         label("唤醒词", font=FONT)
-        self.keyword_var = tk.StringVar(value=self.cfg.get("wake", {}).get("keyword", "Hi Fairy"))
+        self.keyword_var = tk.StringVar(value=self.cfg.get("wake", {}).get("keyword", "Hi Firefly"))
         ttk.Entry(wrap, textvariable=self.keyword_var, width=46).grid(
             row=row["n"], column=1, sticky="w", pady=3)
 
@@ -1476,6 +1553,60 @@ class ConsoleApp:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
         messagebox.showinfo("已保存", "人设已保存，下一句对话立即生效。")
+
+    def _save_api_key(self) -> None:
+        """独立保存 API Key：写盘 → 立即重载 → 反馈。"""
+        new_key = self.key_var.get().strip()
+        if not new_key:
+            self.key_status_var.set("留空不改变已有的 Key")
+            return
+        cfg_path = Path("config.json")
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.key_status_var.set(f"读取失败：{exc}")
+            return
+        old_key = str((raw.get("mimo") or {}).get("api_key") or "")
+        if old_key and new_key != old_key:
+            if not messagebox.askyesno(
+                    "更换 API Key",
+                    "你正在更换一个已经配置好的 API Key。\n\n"
+                    "为了安全，旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                    "就得回小米开放平台重新复制一次。\n\n"
+                    "选「否」= 不换 Key。\n\n确定更换吗？",
+                    icon="warning"):
+                self.key_var.set("")
+                self.key_status_var.set("已取消更换，保留原 Key")
+                return
+        raw.setdefault("mimo", {})["api_key"] = new_key
+        cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.cfg = load_config()  # 内存配置立即刷新
+        self._cfg_snapshot = self._ui_cfg_snapshot()
+        self.key_var.set("")  # 清空输入框，安全不留痕
+        self.key_status_var.set("✓ API Key 已保存并立即生效")
+        self.worker.submit("reload")  # 通知后台重载大脑
+
+    def _save_llm_settings(self) -> None:
+        """独立保存大脑模型 + 接口地址：写盘 → 立即重载 → 反馈。"""
+        model = self.model_var.get().strip()
+        base_url = self.baseurl_var.get().strip()
+        if not model:
+            self.llm_status_var.set("模型名不能为空")
+            return
+        cfg_path = Path("config.json")
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.llm_status_var.set(f"读取失败：{exc}")
+            return
+        raw.setdefault("llm", {})
+        raw["llm"]["model"] = model
+        raw["llm"]["base_url"] = base_url
+        cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.cfg = load_config()
+        self._cfg_snapshot = self._ui_cfg_snapshot()
+        self.llm_status_var.set(f"✓ 模型={model} 已保存并立即生效")
+        self.worker.submit("reload")
 
     def _save_config(self) -> None:
         """保存配置。数字字段**逐项**校验：填错的那一项回退原值，绝不连带挡住其它设置。
@@ -1762,7 +1893,7 @@ class ConsoleApp:
             finally:
                 self.root.after(0, lambda: self.btn_voice_test.configure(state="normal"))
 
-        threading.Thread(target=work, daemon=True, name="fairy-voice-test").start()
+        threading.Thread(target=work, daemon=True, name="firefly-voice-test").start()
 
     def _validate_ref_audio(self) -> None:
         ok, detail = validate_reference_audio(self.ref_audio_var.get())
@@ -1809,7 +1940,7 @@ class ConsoleApp:
                 self.root.after(0, lambda r=reason: self._voice_feedback(False, f"录音失败：{r[:120]}"))
                 self.root.after(0, lambda r=reason: messagebox.showerror("录音失败", r))
 
-        threading.Thread(target=work, daemon=True, name="fairy-ref-record").start()
+        threading.Thread(target=work, daemon=True, name="firefly-ref-record").start()
 
     def _browse_ref_audio(self) -> None:
         """浏览选择参考音频文件（voiceclone用，官方仅支持 wav/mp3）。"""
@@ -2014,59 +2145,73 @@ class ConsoleApp:
                 msg = self.ui.get_nowait()
             except queue.Empty:
                 break
-            kind = msg[0]
-            if kind == "chat_user":
-                self._chat_append("user", msg[1])
-            elif kind == "chat_fairy":
-                self._chat_append("fairy", msg[1])
-                # 情绪在后台异步演化，稍等一下再拉一次快照，数值条才能跟上
-                self.root.after(1800, self._refresh_emotion)
-            elif kind == "emotion":
-                self._render_emotion(msg[1])
-            elif kind == "emotion_error":
-                self._render_emotion(None, str(msg[1]))
-            elif kind == "context":
-                self._show_context(msg[1])
-            elif kind == "chat_sys":
-                self._chat_append("sys", msg[1])
-            elif kind == "status":
-                self.status_var.set(msg[1])
-            elif kind == "reload_note":
-                # 配置热重载（D1）：状态栏闪一行，聊天区落一条 sys 留痕
-                notes = msg[1] if len(msg) > 1 else []
-                if notes:
-                    human = "｜".join(notes)
-                    self.status_var.set(f"⚙ 配置已热重载：{human}")
-                    self._chat_append("sys", f"⚙ 配置已热重载：{human}")
-            elif kind == "busy":
-                self._set_busy(bool(msg[1]))
-            elif kind == "confirm":
-                _, prompt, ev, box = msg
-                box["ok"] = messagebox.askyesno("⚠️ 危险操作确认", prompt, icon="warning")
-                ev.set()
-            elif kind == "pet_state":
-                if self.pet_q is not None:
-                    self.pet_q.put(msg[1])  # 对话状态实时驱动桌宠表情
-            elif kind == "log_line":
-                self.tool_box.configure(state="normal")
-                self.tool_box.insert("end", msg[1] + "\n")
-                self.tool_box.see("end")
-                self.tool_box.configure(state="disabled")
-            elif kind == "tool_done":
-                self._tool_running = False
-                self.btn_diag.configure(state="normal")
-                self.btn_selftest.configure(state="normal")
-                self.tool_box.configure(state="normal")
-                self.tool_box.insert("end", f"\n—— 结束（退出码 {msg[1]}）——\n")
-                self.tool_box.see("end")
-                self.tool_box.configure(state="disabled")
+            try:
+                kind = msg[0]
+                if kind == "chat_user":
+                    self._chat_append("user", msg[1])
+                elif kind == "chat_firefly":
+                    self._chat_append("firefly", msg[1])
+                    # 情绪在后台异步演化，稍等一下再拉一次快照，数值条才能跟上
+                    self.root.after(1800, self._refresh_emotion)
+                elif kind == "emotion":
+                    self._render_emotion(msg[1])
+                elif kind == "emotion_error":
+                    self._render_emotion(None, str(msg[1]))
+                elif kind == "context":
+                    self._show_context(msg[1])
+                elif kind == "chat_sys":
+                    self._chat_append("sys", msg[1])
+                elif kind == "status":
+                    self.status_var.set(msg[1])
+                elif kind == "reload_note":
+                    # 配置热重载（D1）：状态栏闪一行，聊天区落一条 sys 留痕
+                    notes = msg[1] if len(msg) > 1 else []
+                    if notes:
+                        human = "｜".join(notes)
+                        self.status_var.set(f"⚙ 配置已热重载：{human}")
+                        self._chat_append("sys", f"⚙ 配置已热重载：{human}")
+                elif kind == "busy":
+                    self._set_busy(bool(msg[1]))
+                elif kind == "confirm":
+                    _, prompt, ev, box = msg
+                    try:
+                        box["ok"] = messagebox.askyesno("⚠️ 危险操作确认", prompt, icon="warning")
+                    except Exception:  # noqa: BLE001 —— 弹窗失败时拒绝操作
+                        box["ok"] = False
+                    ev.set()
+                elif kind == "pet_state":
+                    if self.pet_q is not None:
+                        self.pet_q.put(msg[1])  # 对话状态实时驱动桌宠表情
+                elif kind == "log_line":
+                    self.tool_box.configure(state="normal")
+                    self.tool_box.insert("end", msg[1] + "\n")
+                    self.tool_box.see("end")
+                    self.tool_box.configure(state="disabled")
+                elif kind == "tool_done":
+                    self._tool_running = False
+                    self.btn_diag.configure(state="normal")
+                    self.btn_selftest.configure(state="normal")
+                    self.tool_box.configure(state="normal")
+                    self.tool_box.insert("end", f"\n—— 结束（退出码 {msg[1]}）——\n")
+                    self.tool_box.see("end")
+                    self.tool_box.configure(state="disabled")
+            except Exception as exc:  # noqa: BLE001 —— 单条消息异常不阻断整个轮询
+                import traceback
+                traceback.print_exc()
+                # confirm 消息异常时必须释放等待线程，否则 ChatWorker 会永久挂起
+                if msg[0] == "confirm" and len(msg) >= 4:
+                    try:
+                        msg[3]["ok"] = False
+                        msg[2].set()
+                    except Exception:  # noqa: BLE001
+                        pass
         self.root.after(150, self._poll_ui)
 
     def _on_close(self) -> None:
         """点击关闭按钮 → 最小化到系统托盘（而非退出）。"""
         if self.busy:
             if not messagebox.askyesno(
-                    "最小化", "Fairy 正在回复中，最小化到托盘后对话会在后台继续。确定？"):
+                    "最小化", "Firefly 正在回复中，最小化到托盘后对话会在后台继续。确定？"):
                 return
         self.root.withdraw()  # 隐藏窗口
         if not hasattr(self, "_tray_icon") or self._tray_icon is None:
@@ -2075,7 +2220,7 @@ class ConsoleApp:
     def _quit_app(self) -> None:
         """真正退出应用。"""
         if self.busy and not messagebox.askyesno(
-                "退出", "Fairy 正在回复中，退出将中断本轮对话。确定退出？"):
+                "退出", "Firefly 正在回复中，退出将中断本轮对话。确定退出？"):
             return
         # 防止"改了配置/人设却没保存"就退出，白改一场
         changed = self._cfg_dirty_changes()
@@ -2126,7 +2271,7 @@ class ConsoleApp:
                 pystray.MenuItem("显示控制台", self._tray_restore, default=True),
                 pystray.MenuItem("退出", self._tray_quit),
             )
-            self._tray_icon = pystray.Icon("fairy", image, "流萤 Fairy", menu)
+            self._tray_icon = pystray.Icon("firefly", image, "流萤 Firefly", menu)
             threading.Thread(target=self._tray_icon.run, daemon=True).start()
         except Exception:
             pass

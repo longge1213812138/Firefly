@@ -16,7 +16,7 @@
 另外会把 persona\\ 与 config.example.json 复制到 dist\\；
 exe 首次运行若没有 config.json，会自动按模板生成一份。
 
-为什么不是简单的 `pyinstaller fairy.py`：
+为什么不是简单的 `pyinstaller firefly.py`：
   · core/actions.py、gui.py 里的"项目根"必须指向 exe 同级目录，否则数据会写进临时解包目录；
     这一点由 core/config.py 的 resolve_root() 处理（识别 sys.frozen）。
   · pystray 的后端是运行时动态导入的，必须显式声明 hidden-import。
@@ -38,10 +38,10 @@ ASSETS = ROOT / "assets"
 SEP = ";" if sys.platform == "win32" else ":"
 
 TARGETS = [
-    ("流萤", "fairy.py"),
+    ("流萤", "firefly.py"),
 ]
 
-USAGE = """流萤 Fairy · 使用说明
+USAGE = """流萤 Firefly · 使用说明
 ================================
 
 第一次使用：
@@ -73,7 +73,7 @@ USAGE = """流萤 Fairy · 使用说明
 
 注意事项：
   · 首次运行若提示找不到 config.json，会自动按 config.example.json 生成一份
-  · 语音唤醒「Hi Fairy」需要额外装 pvporcupine；没装就用空格键说话
+  · 语音唤醒「Hi Firefly」需要额外装 pvporcupine；没装就用空格键说话
   · 想换电脑使用：把整个 dist 文件夹拷过去即可（不含任何密钥以外的机器绑定信息）
 """
 
@@ -108,9 +108,9 @@ def build(only: str | None = None) -> int:
         print(r"  .venv\Scripts\python.exe -m pip install pyinstaller")
         return 1
 
-    icon = ASSETS / "fairy.ico"
+    icon = ASSETS / "firefly.ico"
     has_icon = make_icon(icon)
-    print("图标：" + ("已生成 assets/fairy.ico" if has_icon else "生成失败，跳过"))
+    print("图标：" + ("已生成 assets/firefly.ico" if has_icon else "生成失败，跳过"))
 
     common = [
         # 不用 --clean：它会整目录删除 build/<name>/localpycs，既慢又容易触发删除保护。
@@ -141,7 +141,7 @@ def build(only: str | None = None) -> int:
         args = [str(ROOT / script), "--name", name, *common]
         try:
             pyi.run(args)
-            print(f"✅ {name}.exe 打包完成")
+            print(f"[OK] {name}.exe done")
         except SystemExit as exc:  # PyInstaller 用 SystemExit 表示失败
             if exc.code:
                 failed.append(name)
@@ -149,7 +149,7 @@ def build(only: str | None = None) -> int:
 
     # 把「用户可以自己改」的文件放到 exe 旁边
     DIST.mkdir(parents=True, exist_ok=True)
-    for item in ("persona", "config.example.json"):
+    for item in ("persona", "config.example.json", "config.json"):
         src = ROOT / item
         if not src.exists():
             continue
@@ -165,9 +165,9 @@ def build(only: str | None = None) -> int:
     for name, _ in TARGETS:
         exe = DIST / f"{name}.exe"
         if exe.exists():
-            print(f"  ✅ {exe}   {exe.stat().st_size / 1024 / 1024:.1f} MB")
+            print(f"  [OK] {exe}   {exe.stat().st_size / 1024 / 1024:.1f} MB")
     if failed:
-        print(f"  ❌ 失败：{failed}")
+        print(f"  [FAIL] {failed}")
         return 1
     print(f"\n全部完成，产物在：{DIST}")
     return 0

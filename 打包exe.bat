@@ -1,10 +1,10 @@
 @echo off
 cd /d "%~dp0"
-title Fairy - Build EXE
+title Firefly - Build EXE
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 echo ==========================================
-echo   Fairy - build runnable EXE (PyInstaller)
+echo   Firefly - build runnable EXE (PyInstaller)
 echo ==========================================
 echo Using Python: %PY%
 echo.

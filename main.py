@@ -1,4 +1,4 @@
-"""Fairy（流萤）本地语音助手 · 主入口
+"""Firefly（流萤）本地语音助手 · 主入口
 
 用法（一键脚本已封装，也可命令行）：
   python main.py              语音模式（默认；桌宠随语音模式自动出现）
@@ -34,6 +34,7 @@ from core import actions, audio_io, llm as llm_mod, safety  # noqa: E402
 from core.asr import make_asr  # noqa: E402
 from core.config import config_path, load_config, load_persona  # noqa: E402
 from core.emotion import EmotionModel  # noqa: E402
+from core.harness import AsyncExecutor, Task, TaskQueue, TaskState, make_harness  # noqa: E402
 from core.memory import Memory  # noqa: E402
 from core.sentence_buffer import SentenceBuffer  # noqa: E402
 from core.stats import UsageStats  # noqa: E402
@@ -66,13 +67,13 @@ class _StreamSpeaker:
     检测到用户插话（barge-in）会立刻停止并丢弃剩余句子。
     """
 
-    def __init__(self, fairy: "Fairy"):
-        self.fairy = fairy
+    def __init__(self, firefly: "Firefly"):
+        self.firefly = firefly
         self.buf = SentenceBuffer()
         self.q: "queue.Queue[tuple]" = queue.Queue()
         self.interrupted = threading.Event()
         self._cancelled = False
-        self.thread = threading.Thread(target=self._run, daemon=True, name="fairy-speaker")
+        self.thread = threading.Thread(target=self._run, daemon=True, name="firefly-speaker")
         self.thread.start()
 
     def feed_delta(self, delta: str) -> None:
@@ -93,7 +94,7 @@ class _StreamSpeaker:
 
     def _speak_one(self, text: str) -> bool:
         """合成并播一句；返回 True 表示被用户插话打断。"""
-        f = self.fairy
+        f = self.firefly
         try:
             f._set_state("speaking")
             instr = f._tts_instruction()
@@ -141,7 +142,7 @@ class _StreamSpeaker:
                 self.interrupted.set()
 
 
-class Fairy:
+class Firefly:
     def __init__(self, cfg: dict, speak: bool = True, verbose: bool = True,
                  confirm_fn=None, echo: bool = True, emotion=None,
                  config_file: str | None = None):
@@ -171,6 +172,99 @@ class Fairy:
         # 配置热重载（D1）：记住这次用的是哪个配置文件、内容指纹是什么
         self._config_path = Path(config_file) if config_file else config_path()
         self._cfg_fingerprint = self._read_cfg_fingerprint()
+        # Harness：任务编排与执行框架
+        self._harness_queue: TaskQueue | None = None
+        self._harness_executor: AsyncExecutor | None = None
+        self._task_output_buffer: dict[str, list[str]] = {}  # task_id -> output lines
+        self._init_harness()
+
+    # ---------- Harness 任务框架 ----------
+    def _init_harness(self) -> None:
+        """初始化 harness（如果配置启用）。"""
+        from core.harness import make_harness
+        self._harness_queue, self._harness_executor = make_harness(self.cfg)
+        if self._harness_executor is not None:
+            # 注册 pi_agent 执行器
+            self._harness_executor.register_executor("pi_agent", self._harness_pi_executor)
+            # 注册任务状态回调
+            if self._harness_queue:
+                self._harness_queue.set_on_update(self._on_task_update)
+            if self.verbose:
+                print("  ✅ Harness 任务框架已启用", flush=True)
+
+    def _harness_pi_executor(self, task: Task, cfg: dict) -> tuple[bool, any, str]:
+        """harness 调用的 pi_agent 执行器。"""
+        from core import agent_backend
+
+        backend_name = str(cfg.get("pi", {}).get("backend") or "pi")
+        backend = agent_backend.get_backend(backend_name, cfg)
+        if backend is None:
+            return False, None, f"没有注册名为「{backend_name}」的 agent 后端"
+        if not backend.available():
+            return False, None, f"{backend.describe()} 不可用"
+
+        # 使用 run_with_cancel 支持取消
+        res = backend.run_with_cancel(
+            task.args.get("task", ""),
+            read_only=bool(task.args.get("read_only", cfg.get("pi", {}).get("read_only", False))),
+            cancel_event=task._cancel_event,
+            on_output_line=lambda line: task.output_lines.append(line),
+        )
+        if not res.ok:
+            return False, None, res.error or "无输出"
+        return True, res.text, ""
+
+    def _on_task_update(self, task: Task) -> None:
+        """任务状态变更回调。"""
+        if not self.cfg.get("harness", {}).get("auto_broadcast", True):
+            return
+        # 只对终态广播
+        if task.state.is_terminal:
+            if self.verbose:
+                print(f"  📋 {task.summary()}", flush=True)
+
+    def submit_task(self, name: str, args: dict, backend: str = "") -> tuple[bool, str, str]:
+        """提交任务到 harness。返回 (成功, 消息, task_id)。"""
+        if self._harness_queue is None:
+            return False, "Harness 未启用（请在 config.json 开启 harness.enabled）", ""
+        task = Task(name=name, args=args, backend=backend)
+        ok, msg = self._harness_queue.enqueue(task)
+        return ok, msg, task.id if ok else ""
+
+    def get_task_status(self, task_id: str) -> str | None:
+        """获取任务状态摘要。"""
+        if self._harness_queue is None:
+            return None
+        task = self._harness_queue.get(task_id)
+        return task.summary() if task else None
+
+    def cancel_task(self, task_id: str) -> tuple[bool, str]:
+        """取消任务。"""
+        if self._harness_queue is None:
+            return False, "Harness 未启用"
+        return self._harness_queue.cancel(task_id)
+
+    def list_tasks(self, state_filter: TaskState | None = None) -> list[dict]:
+        """列出所有任务（可选按状态过滤）。"""
+        if self._harness_queue is None:
+            return []
+        tasks = self._harness_queue.all_tasks()
+        if state_filter is not None:
+            tasks = [t for t in tasks if t.state == state_filter]
+        return [t.to_dict() for t in tasks]
+
+    def get_task_result(self, task_id: str) -> tuple[bool, any, str]:
+        """获取任务结果。返回 (存在, 结果, 错误)。"""
+        if self._harness_queue is None:
+            return False, None, "Harness 未启用"
+        task = self._harness_queue.get(task_id)
+        if task is None:
+            return False, None, f"未找到任务 {task_id}"
+        if task.state == TaskState.COMPLETED:
+            return True, task.result, ""
+        if task.state == TaskState.FAILED:
+            return True, None, task.error
+        return True, None, f"任务状态：{task.state.display}"
 
     # ---------- 配置热重载（D1） ----------
     def _read_cfg_fingerprint(self) -> str:
@@ -222,6 +316,14 @@ class Fairy:
                 pass
             self.memory = Memory(new_db)
             changes.append("记忆库路径已切换")
+        # Harness 配置变更
+        old_harness = (old_cfg.get("harness", {}) or {}).get("enabled", False)
+        new_harness = (new_cfg.get("harness", {}) or {}).get("enabled", False)
+        if old_harness != new_harness:
+            if self._harness_executor is not None:
+                self._harness_executor.stop()
+            self._init_harness()
+            changes.append("Harness 任务框架" + ("已启用" if new_harness else "已停用"))
         return changes
 
     # 热重载时要报给用户看的字段（人话名称 -> (配置段, 键)）。
@@ -373,6 +475,13 @@ class Fairy:
         if mood:
             parts += ["", mood]
             blocks.append(("此刻心情", mood))
+        # Harness 任务上下文
+        if self._harness_queue is not None:
+            from core.harness_middleware import build_task_context
+            task_ctx = build_task_context(self._harness_queue)
+            if task_ctx:
+                parts += ["", task_ctx]
+                blocks.append(("任务状况", task_ctx))
         self._context_head = blocks   # 留给「本轮上下文」可视化（P2-8）
         return "\n".join(parts)
 
@@ -437,24 +546,59 @@ class Fairy:
     def _finalize_action_text(self, messages: list[dict], text: str, acts: list[dict],
                               auto_confirm: bool) -> str:
         """执行动作（含确认）并返回最终应说出的文本；可能触发第二次 LLM 调用。"""
-        require_any = any(safety.needs_confirm(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
-        hard_any = any(safety.is_hard(self.cfg, a.get("name", ""), a.get("args") or {}) for a in acts)
+        # 检查是否有 pi_agent 动作且 harness 启用
+        pi_acts = [a for a in acts if a.get("name") == "pi_agent"]
+        other_acts = [a for a in acts if a.get("name") != "pi_agent"]
+
+        # 如果有 pi_agent 且 harness 启用，路由到 harness
+        if pi_acts and self._harness_queue is not None:
+            results = []
+            for a in pi_acts:
+                task_args = a.get("args") or {}
+                # 仍然需要确认（硬闸口）
+                prompt = safety.format_confirm_list([a])
+                if not (self.confirm_fn and self.confirm_fn(prompt)):
+                    safety.audit(self.cfg, {"session_id": self.session_id,
+                                            "action": "pi_agent", "args": task_args,
+                                            "result": "用户拒绝", "risk": "high", "hard": True})
+                    results.append("pi_agent 已取消")
+                    continue
+                # 提交到 harness
+                ok, msg, task_id = self.submit_task("pi_agent", task_args)
+                if ok:
+                    safety.audit(self.cfg, {"session_id": self.session_id,
+                                            "action": "pi_agent", "args": task_args,
+                                            "result": "已提交异步执行", "risk": "high", "hard": True})
+                    results.append(f"pi_agent 已提交异步执行（ID: {task_id}）")
+                else:
+                    results.append(f"pi_agent 提交失败：{msg}")
+            note = f"（操作结果：{'；'.join(results)[:400]}）"
+            messages.append({"role": "assistant", "content": text})
+            messages.append({"role": "user", "content": f"系统提示：{note} 请用自然语言简短告诉用户结果。"})
+            try:
+                return self.llm.chat(messages).strip()
+            except Exception:
+                return (text + " " + note).strip()
+
+        # 其他动作走原有流程
+        require_any = any(safety.needs_confirm(self.cfg, a.get("name", ""), a.get("args") or {}) for a in other_acts)
+        hard_any = any(safety.is_hard(self.cfg, a.get("name", ""), a.get("args") or {}) for a in other_acts)
         allowed = True
         if require_any:
-            prompt = safety.format_confirm_list(acts)
+            prompt = safety.format_confirm_list(other_acts)
             if hard_any:
                 allowed = bool(self.confirm_fn and self.confirm_fn(prompt))
             else:
                 allowed = True if auto_confirm else bool(self.confirm_fn and self.confirm_fn(prompt))
         if not allowed:
-            for a in acts:
+            for a in other_acts:
                 safety.audit(self.cfg, {"session_id": self.session_id,
                                         "action": a.get("name", ""), "args": a.get("args") or {},
                                         "result": "用户拒绝", "risk": "high"})
-            note = f"（用户在确认清单上取消了全部 {len(acts)} 个操作）"
+            note = f"（用户在确认清单上取消了全部 {len(other_acts)} 个操作）"
         else:
             results = []
-            for a in acts:  # 已在清单上确认过 → 逐个执行
+            for a in other_acts:  # 已在清单上确认过 → 逐个执行
                 ok, out = actions.execute(self.cfg, a, auto_confirm=True,
                                           session_id=self.session_id,
                                           confirm_fn=self.confirm_fn)
@@ -483,6 +627,12 @@ class Fairy:
 
     def respond(self, user_text: str, auto_confirm: bool = False) -> str:
         """非流式一轮对话（文本 / GUI 路径）：同步返回最终回复文本。"""
+        # 检查是否是任务状态查询
+        task_reply = self._check_task_query(user_text)
+        if task_reply is not None:
+            self._record_turn(user_text, task_reply)
+            return task_reply
+
         self._set_state("thinking")
         try:
             messages = self._prepare_messages(user_text)
@@ -494,6 +644,46 @@ class Fairy:
             return text
         finally:
             self._set_state("idle")
+
+    def _check_task_query(self, user_text: str) -> str | None:
+        """检查是否是任务状态查询，如果是则直接返回结果。"""
+        if self._harness_queue is None:
+            return None
+        from core.harness_middleware import is_task_query, is_cancel_request, format_task_list, format_task_detail
+
+        # 取消请求
+        is_cancel, cancel_id = is_cancel_request(user_text)
+        if is_cancel:
+            if cancel_id:
+                ok, msg = self.cancel_task(cancel_id)
+                return msg
+            else:
+                # 取消所有
+                tasks = self.list_tasks()
+                cancelled = 0
+                for t in tasks:
+                    if t.get('state') in ('pending', 'running'):
+                        self.cancel_task(t['id'])
+                        cancelled += 1
+                return f"已取消 {cancelled} 个任务" if cancelled else "没有需要取消的任务"
+
+        # 状态查询
+        if is_task_query(user_text):
+            # 检查是否查询特定任务
+            import re
+            m = re.search(r"[0-9a-f]{8}", user_text.lower())
+            if m:
+                task_id = m.group(0)
+                status = self.get_task_status(task_id)
+                return status if status else f"未找到任务 {task_id}"
+            # 列出所有任务
+            tasks = self.list_tasks()
+            if not tasks:
+                return "当前没有任何任务在执行。"
+            from core.harness_middleware import format_task_list
+            return format_task_list(tasks)
+
+        return None
 
     def respond_stream(self, user_text: str, auto_confirm: bool = False) -> tuple[str, bool]:
         """语音路径：流式 LLM + 按句合成、抢先播报。返回 (最终文本, 是否被插话打断)。
@@ -536,7 +726,7 @@ class Fairy:
             # 无动作：正常收尾，播最后积压句（已在后台合成/播放前面的句子）
             speaker.finish(has_action=False)
             if self.echo:
-                print(f"\n🧚 Fairy：{text.strip()}\n", flush=True)
+                print(f"\n🧚 Firefly：{text.strip()}\n", flush=True)
             speaker.join()
             self._record_turn(user_text, text, acts)
             return text, speaker.interrupted.is_set()
@@ -544,17 +734,23 @@ class Fairy:
             self._set_state("idle")
 
     # ---------- 显式调用外部 agent（Pi） ----------
-    def run_pi_task(self, task: str) -> str:
+    def run_pi_task(self, task: str, use_harness: bool | None = None) -> str:
         """用户明确要求时，把任务交给外部 agent（默认 Pi）。
 
         长期记忆只在陪伴端：这里只把任务转出去，结果回来后写进**陪伴端自己的**记忆。
         该动作是硬闸口——每次调用都必须当面确认。
+
+        use_harness: None=自动判断（harness 启用就异步），True=强制异步，False=强制同步。
         """
         from core import agent_backend
 
         task = (task or "").strip()
         if not task:
             return "想让 Pi 做什么？可以这样写：/pi 帮我看看这个项目的结构"
+
+        # 安全闸口：pi.enabled 关闭时直接拒绝，不尝试初始化后端
+        if not self.cfg.get("pi", {}).get("enabled", True):
+            return "Pi 功能已关闭。请在配置中打开 pi.enabled 后重试。"
 
         backend_name = str(self.cfg.get("pi", {}).get("backend") or "pi")
         backend = agent_backend.get_backend(backend_name, self.cfg)
@@ -564,6 +760,7 @@ class Fairy:
             return (f"没找到可用的 {backend_name} 命令行——{backend.describe()}\n"
                     "（请先安装 Pi，或在 config.json 的 pi.cli_path 填绝对路径）")
 
+        # 确认闸口（硬闸口，无法绕过）
         prompt = (f"即将调用「{backend_name}」执行任务：\n  {task}\n"
                   "它会读写文件、执行命令，可能改动你的项目。")
         confirm = self.confirm_fn or safety.confirm_interactive
@@ -574,6 +771,27 @@ class Fairy:
                                     "result": "用户拒绝", "risk": "high", "hard": True})
             return "好，那我不调用 Pi 了。"
 
+        # 判断是否使用 harness 异步执行
+        _use_harness = use_harness
+        if _use_harness is None:
+            _use_harness = self._harness_queue is not None
+
+        if _use_harness and self._harness_queue is not None:
+            # 异步模式：提交到 harness，立即返回
+            ok, msg, task_id = self.submit_task(
+                "pi_agent",
+                {"task": task, "read_only": bool(self.cfg.get("pi", {}).get("read_only", False))},
+                backend=backend_name,
+            )
+            if ok:
+                safety.audit(self.cfg, {"session_id": self.session_id, "action": "pi_agent",
+                                        "args": {"task": task, "backend": backend_name},
+                                        "result": "已提交异步执行", "risk": "high", "hard": True})
+                return f"任务已提交（ID: {task_id}），正在后台执行。你可以继续聊天，随时问我「任务做得怎么样了」查看进度。"
+            else:
+                return f"任务提交失败：{msg}"
+
+        # 同步模式（原有行为）
         self._set_state("thinking")
         if self.verbose:
             print(f"  🔧 正在调用 {backend_name}……（长任务可能几分钟，请稍候）", flush=True)
@@ -656,7 +874,7 @@ class Fairy:
     def say(self, text: str) -> bool:
         """播报回复。返回 True 表示被用户插话打断，False 表示自然播完。"""
         if self.echo:
-            print(f"\n🧚 Fairy：{text}\n", flush=True)
+            print(f"\n🧚 Firefly：{text}\n", flush=True)
         self._set_state("speaking")
         try:
             if not self.speak:
@@ -709,13 +927,13 @@ class Fairy:
                              device=self.cfg["audio"].get("input_device"))
         mode = waker.start()
         if mode == "porcupine":
-            print(f"\n✅ 语音唤醒已就绪：说「{self.cfg['wake'].get('keyword','Hi Fairy')}」即可叫我", flush=True)
+            print(f"\n✅ 语音唤醒已就绪：说「{self.cfg['wake'].get('keyword','Hi Firefly')}」即可叫我", flush=True)
         else:
             print("\n⚠️ 未配置 Picovoice 语音唤醒，已启用【空格键说话】兜底模式", flush=True)
-            print("   → 按【空格】后直接说你要说的话（不用喊 Hi Fairy），说完停顿约 1 秒自动结束", flush=True)
+            print("   → 按【空格】后直接说你要说的话（不用喊 Hi Firefly），说完停顿约 1 秒自动结束", flush=True)
             print("   → 按【Q】退出", flush=True)
             print("   → 注意：黑窗口被鼠标点过后会进入「标记模式」吞掉按键，按一下 Esc 可解除", flush=True)
-            print("   → 想用真·语音唤醒「Hi Fairy」，请看 README 里的 3 步配置指引", flush=True)
+            print("   → 想用真·语音唤醒「Hi Firefly」，请看 README 里的 3 步配置指引", flush=True)
 
         print(f"   会话 ID：{self.session_id}｜历史记忆：{self.memory.count()} 条", flush=True)
         print("   改了 config.json（音色/模型等）不用重启：下一句自动生效\n", flush=True)
@@ -741,7 +959,7 @@ class Fairy:
                         user_text = ""
                 if not user_text:
                     continue
-                # 云端兜底：即使没有本地唤醒引擎，喊「Hi Fairy」也会立刻回应
+                # 云端兜底：即使没有本地唤醒引擎，喊「Hi Firefly」也会立刻回应
                 if is_wake_phrase(user_text):
                     print(f"\n🗣 你：{user_text}", flush=True)
                     self.say("我在呢，说吧。")
@@ -767,7 +985,7 @@ class Fairy:
                     if not interrupted:
                         break
                     # 被用户插话打断 → 立即接着听他说
-                    print("  🎤 你打断了 Fairy，请继续说……", flush=True)
+                    print("  🎤 你打断了 Firefly，请继续说……", flush=True)
                     try:
                         user_text = self.listen()
                     except Exception as exc:  # noqa: BLE001
@@ -810,7 +1028,7 @@ class Fairy:
             if user_text.startswith("/pi"):
                 t0 = time.time()
                 reply = self.run_pi_task(user_text[3:])
-                print(f"\n🧚 Fairy（{time.time()-t0:.1f}s）：{reply}\n", flush=True)
+                print(f"\n🧚 Firefly（{time.time()-t0:.1f}s）：{reply}\n", flush=True)
                 continue
             t0 = time.time()
             try:
@@ -818,7 +1036,7 @@ class Fairy:
             except Exception as exc:  # noqa: BLE001
                 print(f"（对话失败：{exc}）", flush=True)
                 continue
-            print(f"\n🧚 Fairy（{time.time()-t0:.1f}s）：{reply}\n", flush=True)
+            print(f"\n🧚 Firefly（{time.time()-t0:.1f}s）：{reply}\n", flush=True)
             if self.speak:
                 self.say(reply)
         self.memory.close()
@@ -830,13 +1048,13 @@ def _is_exit(text: str) -> bool:
 
 
 def is_wake_phrase(text: str) -> bool:
-    """识别结果是否只是在叫名字（Hi Fairy），用于云端兜底唤醒。"""
+    """识别结果是否只是在叫名字（Hi Firefly），用于云端兜底唤醒。"""
     if not text:
         return False
     t = re.sub(r"[^\w\u4e00-\u9fff]", "", text.lower())
     if len(t) > 14:
         return False
-    return any(k in t for k in ("fairy", "菲儿", "菲瑞", "飞儿", "费尔瑞"))
+    return any(k in t for k in ("firefly", "菲儿", "菲瑞", "飞儿", "费尔瑞"))
 
 
 def diag(cfg: dict) -> None:
@@ -934,7 +1152,7 @@ def emotion_check(cfg: dict) -> None:
 
 
 def run_app(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Fairy 本地语音助手")
+    ap = argparse.ArgumentParser(description="Firefly 本地语音助手")
     ap.add_argument("--text", action="store_true", help="键盘输入模式")
     ap.add_argument("--devices", action="store_true", help="列出音频设备")
     ap.add_argument("--search", metavar="关键词", help="检索历史对话")
@@ -1013,11 +1231,11 @@ def run_app(argv: list[str] | None = None) -> int:
         from tests.smoke_test import run_selftest
         return run_selftest(cfg)
 
-    fairy = Fairy(cfg, speak=not args.no_speak)
+    firefly = Firefly(cfg, speak=not args.no_speak)
     if args.text:
-        fairy.run_text()
+        firefly.run_text()
     else:
-        fairy.run_voice()
+        firefly.run_voice()
     return 0
 
 

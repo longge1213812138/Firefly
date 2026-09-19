@@ -31,8 +31,8 @@ try:
 except Exception:  # pragma: no cover - 无 tkinter 环境下降级
     tk = None
 
-STATES = ("idle", "listening", "thinking", "speaking")
-STATE_TEXT = {"idle": "待机中", "listening": "聆听中", "thinking": "思考中", "speaking": "说话中"}
+STATES = ("idle", "listening", "thinking", "speaking", "working")
+STATE_TEXT = {"idle": "待机中", "listening": "聆听中", "thinking": "思考中", "speaking": "说话中", "working": "任务执行中"}
 GLOW = ["#2e3318", "#4c551f", "#6f7d2a", "#93a838", "#bcd451", "#e2f76f", "#fbffbe"]
 BG = "#0a0a0e"  # 作为透明色使用，绘制时避开这个确切颜色
 
@@ -74,8 +74,8 @@ def resolve_pet_options(cfg: dict | None) -> dict:
 class PetBrain:
     """状态机 + 动画相位（无窗口依赖，可离线自检）。"""
 
-    _speed = {"idle": 0.05, "listening": 0.13, "thinking": 0.09, "speaking": 0.18}
-    _wing_speed = {"idle": 0.09, "listening": 0.35, "thinking": 0.07, "speaking": 0.22}
+    _speed = {"idle": 0.05, "listening": 0.13, "thinking": 0.09, "speaking": 0.18, "working": 0.12}
+    _wing_speed = {"idle": 0.09, "listening": 0.35, "thinking": 0.07, "speaking": 0.22, "working": 0.25}
 
     def __init__(self, initial: str = "idle"):
         self.state = initial if initial in STATES else "idle"
@@ -113,7 +113,7 @@ class PetBrain:
         return GLOW[max(0, min(len(GLOW) - 1, idx))]
 
 
-class FairyPet:
+class FireflyPet:
     """桌宠窗口（tkinter 主循环阻塞运行）。"""
 
     W, H = 150, 176
@@ -318,7 +318,7 @@ class FairyPet:
 
 def run_pet(cfg: dict | None = None, q: "queue.Queue[str] | None" = None, demo: bool = False) -> None:
     """阻塞运行桌宠（供独立进程 / 桌宠线程调用）。"""
-    FairyPet(cfg, q=q, demo=demo)
+    FireflyPet(cfg, q=q, demo=demo)
 
 
 def start_pet_thread(cfg: dict | None = None, demo: bool | None = None) -> "queue.Queue[str]":
@@ -337,7 +337,7 @@ def start_pet_thread(cfg: dict | None = None, demo: bool | None = None) -> "queu
             import sys
             print(f"（桌宠线程异常：{exc}）", file=sys.stderr, flush=True)
 
-    threading.Thread(target=_run, daemon=True, name="fairy-pet").start()
+    threading.Thread(target=_run, daemon=True, name="firefly-pet").start()
     return q
 
 

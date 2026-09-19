@@ -10,7 +10,7 @@
                        → 对应体检/状态/工具（保留控制台输出）
   流萤.exe api <子命令> → 对外 JSON 接口（保留 stdout，可被外部程序用管道调用）
 
-开发期也可以直接 `python fairy.py` 跑起来，行为与打包后一致。
+开发期也可以直接 `python firefly.py` 跑起来，行为与打包后一致。
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if head == "api":
         # 接口模式：绝不隐藏控制台，保证 stdout 单行 JSON 能被父进程捕获
-        from fairy_api import main as api_main
+        from firefly_api import main as api_main
 
         return api_main(argv[1:])
 

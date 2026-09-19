@@ -1,4 +1,4 @@
-"""唤醒：语音唤醒「Hi Fairy」（Porcupine）+ 空格键兜底。
+"""唤醒：语音唤醒「Hi Firefly」（Porcupine）+ 空格键兜底。
 
 engine = auto 时：
   1. 有 Picovoice access_key 且有 .ppn 唤醒词文件 → 真·语音唤醒
@@ -13,7 +13,7 @@ class WakeListener:
     def __init__(self, wake_cfg: dict, sample_rate: int = 16000, device: int | None = None):
         self.cfg = wake_cfg or {}
         self.engine = self.cfg.get("engine", "auto")
-        self.keyword = self.cfg.get("keyword", "Hi Fairy")
+        self.keyword = self.cfg.get("keyword", "Hi Firefly")
         self.access_key = self.cfg.get("porcupine_access_key", "")
         self.keyword_path = self.cfg.get("porcupine_keyword_path", "")
         self.sensitivity = float(self.cfg.get("sensitivity", 0.85))

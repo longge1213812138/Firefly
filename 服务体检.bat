@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-title Fairy 本地语音助手
+title Firefly 本地语音助手
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=C:\Users\91533\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"

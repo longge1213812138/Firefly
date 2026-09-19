@@ -1,7 +1,7 @@
 """流萤 · 对外接口（入站扩展接口）。
 
 用途：给将来的 Pi 扩展、或其它外部宿主，通过子进程调用陪伴端的能力。
-    python fairy_api.py <子命令> [参数]
+    python firefly_api.py <子命令> [参数]
 
 协议约定（务必遵守）：
   · stdout 只输出**一行**紧凑 JSON；日志/异常一律走 stderr
@@ -80,7 +80,7 @@ def cmd_ping(cfg: dict, args) -> int:
 
 
 def _system_block(cfg: dict, query: str, top_k: int) -> tuple[str, str, int]:
-    """组装注入用的整块文本，逻辑与 Fairy._system_prompt 保持一致，避免人格漂移。
+    """组装注入用的整块文本，逻辑与 Firefly._system_prompt 保持一致，避免人格漂移。
 
     注意：这里和 main.py 的 `_system_prompt` 是**同一份拼装规则的两处实现**，
     改了其中一处就要同步另一处（区块顺序：人设 → 动作说明 → 往事召回 → 此刻心情）。
@@ -104,7 +104,7 @@ def _system_block(cfg: dict, query: str, top_k: int) -> tuple[str, str, int]:
         count = len(mem.search(query, limit=top_k))
         mem.close()
 
-    # 心情段与 Fairy._mood_context 对齐（共用同一个 emotion.inject_to_context 开关）
+    # 心情段与 Firefly._mood_context 对齐（共用同一个 emotion.inject_to_context 开关）
     emo_cfg = cfg.get("emotion", {}) or {}
     if bool(emo_cfg.get("inject_to_context", True)):
         try:
@@ -222,9 +222,9 @@ def cmd_ask(cfg: dict, args) -> int:
 
 # --------------------------------------------------------------------- 入口
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="fairy_api", description="流萤 · 对外接口（单行 JSON）")
+    ap = argparse.ArgumentParser(prog="firefly_api", description="流萤 · 对外接口（单行 JSON）")
     ap.add_argument("--config", default=None, help="config.json 路径")
-    ap.add_argument("--root", default=None, help="项目根目录（覆盖 FAIRY_ROOT）")
+    ap.add_argument("--root", default=None, help="项目根目录（覆盖 FIREFLY_ROOT）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("ping", help="健康检查")

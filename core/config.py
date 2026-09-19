@@ -1,7 +1,7 @@
 """配置加载：全部配置来自本地 config.json，路径基于项目根目录解析。
 
 「项目根」的判定顺序（见 resolve_root）：
-  显式参数 > 环境变量 FAIRY_ROOT > exe 所在目录（PyInstaller 打包后） > 本包的上级目录
+  显式参数 > 环境变量 FIREFLY_ROOT > exe 所在目录（PyInstaller 打包后） > 本包的上级目录
 打包成 exe 后，数据/日志/记忆库一律写在 **exe 同级目录**，而不是临时解包目录。
 """
 import json
@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT / "config.json"
 
-# 项目根可被环境变量 FAIRY_ROOT 覆盖（便于把核心装到别处、或被其它程序按需调用）。
+# 项目根可被环境变量 FIREFLY_ROOT 覆盖（便于把核心装到别处、或被其它程序按需调用）。
 # 不设该变量时行为与以前完全一致：一律解析到本文件的上上级目录。
-ROOT_ENV = "FAIRY_ROOT"
+ROOT_ENV = "FIREFLY_ROOT"
 
 
 def is_frozen() -> bool:
@@ -24,7 +24,7 @@ def is_frozen() -> bool:
 
 
 def resolve_root(root: str | os.PathLike | None = None) -> Path:
-    """决定「项目根」：显式参数 > FAIRY_ROOT > exe 所在目录（打包后） > 本包所在目录。"""
+    """决定「项目根」：显式参数 > FIREFLY_ROOT > exe 所在目录（打包后） > 本包所在目录。"""
     if root:
         return Path(root).expanduser().resolve()
     env = os.environ.get(ROOT_ENV)
@@ -106,5 +106,5 @@ def load_config(path: str | os.PathLike | None = None,
 def load_persona(cfg: dict) -> str:
     p = Path(cfg.get("persona_path", ""))
     if not p.exists():
-        return "你是温柔贴心的中文语音助手 Fairy（流萤），说话简短自然，像朋友聊天。"
+        return "你是温柔贴心的中文语音助手 Firefly（流萤），说话简短自然，像朋友聊天。"
     return p.read_text(encoding="utf-8").strip()

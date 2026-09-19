@@ -25,7 +25,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 OnEvent = Optional[Callable[[str], None]]
 
@@ -169,6 +169,117 @@ class PiCliBackend:
             pass
 
     # -------------------------------------------------- 执行
+    def run_with_cancel(self, task: str, *, read_only: bool = False,
+                        timeout: float | None = None, cwd: str | None = None,
+                        on_event: OnEvent = None, extra_args: list[str] | None = None,
+                        cancel_event: threading.Event | None = None,
+                        on_output_line: Callable[[str], None] | None = None) -> AgentResult:
+        """执行任务，支持取消和实时输出行回调。
+
+        cancel_event: 当此事件被 set() 时，执行器会尽快终止进程。
+        on_output_line: 每收到一行输出时回调（用于 harness 的 task.output_lines 追踪）。
+        """
+        task = (task or "").strip()
+        if not task:
+            return AgentResult(ok=False, backend=self.name, error="空任务")
+
+        # 检查取消
+        if cancel_event and cancel_event.is_set():
+            return AgentResult(ok=False, backend=self.name, error="任务已被取消")
+
+        cli = self.resolve_cli()
+        if not cli:
+            return AgentResult(
+                ok=False, backend=self.name,
+                error="没找到 pi 命令（请先安装 Pi，或在 config.json 的 pi.cli_path 填绝对路径）",
+            )
+
+        cwd = cwd or self.pcfg.get("cwd") or os.getcwd()
+        timeout = float(timeout or self.pcfg.get("timeout", 600) or 600)
+        if read_only is None:
+            read_only = bool(self.pcfg.get("read_only", False))
+        else:
+            read_only = bool(read_only)
+        argv = self._wrap_windows(self.build_argv(task, read_only=read_only, extra_args=extra_args))
+
+        env = dict(os.environ)
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        t0 = time.time()
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=cwd, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+            )
+        except OSError as exc:
+            return AgentResult(ok=False, backend=self.name, argv=argv,
+                               error=f"启动失败：{exc}", duration=time.time() - t0)
+
+        out: list[str] = []
+        err: deque[str] = deque(maxlen=20)
+
+        def _pump(stream, sink, notify: bool) -> None:
+            try:
+                for line in stream or []:
+                    line = line.rstrip("\r\n")
+                    sink.append(line)
+                    if on_output_line:
+                        try:
+                            on_output_line(line)
+                        except Exception:
+                            pass
+                    if notify and on_event:
+                        try:
+                            on_event(line)
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        t_out = threading.Thread(target=_pump, args=(proc.stdout, out, True), daemon=True)
+        t_err = threading.Thread(target=_pump, args=(proc.stderr, err, False), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        timed_out = False
+        cancelled = False
+        # 带取消检查的等待循环
+        wait_interval = 0.5  # 每 0.5 秒检查一次取消
+        elapsed = 0.0
+        while proc.poll() is None:
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                self._kill_tree(proc)
+                break
+            try:
+                proc.wait(timeout=wait_interval)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed += wait_interval
+                if elapsed >= timeout:
+                    timed_out = True
+                    self._kill_tree(proc)
+                    break
+
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
+        dur = time.time() - t0
+        text = "\n".join(out).strip()
+
+        if cancelled:
+            return AgentResult(ok=False, text=text, backend=self.name, argv=argv, code=-2,
+                               duration=dur, error="任务已被用户取消")
+        if timed_out:
+            return AgentResult(ok=False, text=text, backend=self.name, argv=argv, code=-1,
+                               duration=dur, error=f"超时（>{timeout:.0f}s）已被终止")
+        ok = proc.returncode == 0 and bool(text)
+        errmsg = "" if ok else ("\n".join(list(err))[:300] or f"退出码 {proc.returncode}，无输出")
+        return AgentResult(ok=ok, text=text, backend=self.name, argv=argv,
+                           code=proc.returncode or 0, duration=dur, error=errmsg)
+
     def run(self, task: str, *, read_only: bool = False,
             timeout: float | None = None, cwd: str | None = None,
             on_event: OnEvent = None, extra_args: list[str] | None = None) -> AgentResult:

@@ -41,8 +41,8 @@
   },
 
   "wake": {
-    "_说明": "唤醒方式。engine=auto：有 Picovoice Key + 唤醒词模型文件就用语音唤醒「Hi Fairy」，否则降级为空格键说话。",
-    "keyword": "Hi Fairy",
+    "_说明": "唤醒方式。engine=auto：有 Picovoice Key + 唤醒词模型文件就用语音唤醒「Hi Firefly」，否则降级为空格键说话。",
+    "keyword": "Hi Firefly",
     "engine": "auto",
     "porcupine_access_key": "",
     "porcupine_keyword_path": "",

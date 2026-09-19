@@ -133,6 +133,38 @@ class Memory:
                 pass
         return mid
 
+    def add_task_result(self, session_id: str, task_id: str, task_name: str,
+                        success: bool, result: str, error: str = "",
+                        duration: float = 0.0, importance: int = 6) -> int:
+        """添加任务执行结果到记忆。
+
+        Args:
+            session_id: 会话ID
+            task_id: 任务ID
+            task_name: 任务名称（如 pi_agent）
+            success: 是否成功
+            result: 执行结果
+            error: 错误信息（失败时）
+            duration: 执行时长（秒）
+            importance: 重要度（默认6，比普通对话略高）
+        """
+        if success:
+            content = f"（任务 {task_id} 完成）{result[:500]}"
+            category = "笔记"
+        else:
+            content = f"（任务 {task_id} 失败）{error[:200]}"
+            category = "对话"
+        meta = json.dumps({
+            "type": "task_result",
+            "task_id": task_id,
+            "task_name": task_name,
+            "success": success,
+            "duration": round(duration, 2),
+        }, ensure_ascii=False)
+        tags = ["任务", task_name]
+        return self.add(session_id, "assistant", content, meta=meta,
+                        category=category, importance=importance, tags=tags)
+
     def recent(self, session_id: str, limit: int = 20) -> list[dict]:
         cur = self.conn.cursor()
         cur.execute(
@@ -285,7 +317,7 @@ class Memory:
 
     def _fmt_hit(self, h: dict) -> str:
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
-        who = "我" if h["role"] == "user" else "Fairy"
+        who = "我" if h["role"] == "user" else "Firefly"
         cat = str(h.get("category") or "对话")
         tag = f"（{cat}）" if cat and cat != "对话" else ""
         return f"- [{ts}] {who}{tag}：{h['content']}"

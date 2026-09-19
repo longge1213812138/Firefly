@@ -1,6 +1,6 @@
-# 🧚 Fairy（流萤）· 本地优先语音私人助手 MVP
+# 🧚 Firefly（流萤）· 本地优先语音私人助手 MVP
 
-以「情感陪伴 + 接管电脑操作」为核心的本地语音助手。所有对话、记忆、日志**只存在你电脑本地**（`fairy/data/`），除调用云端 API 之外不向外发送数据。
+以「情感陪伴 + 接管电脑操作」为核心的本地语音助手。所有对话、记忆、日志**只存在你电脑本地**（`firefly/data/`），除调用云端 API 之外不向外发送数据。
 
 ---
 
@@ -9,15 +9,16 @@
 | 能力      | 状态       | 说明                                                                                            |
 | ------- | -------- | --------------------------------------------------------------------------------------------- |
 | 记忆系统    | ✅ 可用     | 全部对话写入本地 SQLite，重启不丢；回答时自动召回相关往事。控制台「记忆」页可**按分类/重要度筛选、翻页、调重要度、加标签、删除、导出 JSON/CSV**，双击看全文；命令行 `python main.py --search 关键词` |
-| 语音唤醒    | ⚠️ 两种模式  | ① 真·语音唤醒「Hi Fairy」（需 Picovoice Key，见第四节）② **空格键说话**（无需任何 Key，开箱即用）                            |
+| 语音唤醒    | ⚠️ 两种模式  | ① 真·语音唤醒「Hi Firefly」（需 Picovoice Key，见第四节）② **空格键说话**（无需任何 Key，开箱即用）                            |
 | 双向语音    | ✅ 可用     | 说完自动断句 → 小米 MiMo-ASR 识别 → 大模型回复 → 小米 MiMo-TTS 播报                                              |
-| 语音打断    | ✅ 可用     | Fairy 说话时你直接插话，它立刻闭嘴接着听你说（戴耳机效果最好）                                                            |
+| 语音打断    | ✅ 可用     | Firefly 说话时你直接插话，它立刻闭嘴接着听你说（戴耳机效果最好）                                                            |
 | 电脑操作    | ✅ 可用（受限） | 查时间、列目录、读文件、开程序/网页 **直接执行**；写文件、跑命令等 **必须先确认**；删除/覆盖/外发是**硬闸口**，必须当面确认且无法跳过，批量操作先出「撤销清单」      |
 | 桌宠      | ✅ 可用     | 小萤火虫「流萤」常驻桌面：待机呼吸 / 聆听波纹 / 思考转星 / 说话口型四态动画；可拖拽、贴边隐藏、右键菜单；双击预览四种状态                             |
 | 控制台 GUI | ✅ 可用     | 双击 `控制台.bat`（打包后双击 `流萤.exe` 即可）：六页标签——①对话（危险操作弹窗确认，支持 `/pi`）②**记忆**（分类/重要度筛选、翻页、调重要度、加标签、删除、导出 JSON·CSV，双击看全文）③**情感**（三维情绪状态、情绪曲线、发给 TTS 的风格指令预览与微调）④**配置**（API Key 掩码不回显、模型/音色、**情绪模型设置**、**Pi 协作设置**、唤醒词、录音阈值、人设编辑器、开机自启）⑤统计 ⑥状态（一键体检 / 离线自检 / 审计日志 / 数据位置）。关闭窗口自动最小化到系统托盘 |
 | 声线 / 性格 | ✅ 已预留    | 人设改 `persona/default.md` 或控制台里直接编辑（保存即生效）；音色改 `tts.voice`，后期换 voicedesign/voiceclone 型号即可克隆声线 |
 | 与 Pi 协作 | ✅ 可选 | 平时**完全独立运行、不依赖 Pi**；只有你**明确要求**时才调用本机 `pi` 命令行（对话里输入 `/pi 任务`，或点名"用 Pi 帮我…"），且**每次都会先确认**。长期记忆只存流萤这边，**不与 Pi 共享**；Pi 的长结果只把**摘要**记进记忆 |
 | 情绪模型 | ✅ 可用 | **程序化**情绪：愉悦度 / 唤醒度 / 亲密度三维数值状态，随对话演化、随时间自然平复、重启不丢。每轮由小米 MiMo 大模型推断情绪，再按 **MiMo-V2.5-TTS 官方的自然语言/导演模式**翻译成风格指令交给语音去演绎（支持"温柔但疲惫"这类复合情绪）。控制台「情感」页可视化、可手动微调 |
+| Harness 任务框架 | ✅ 可用 | **异步任务执行**：Pi 任务提交到后台队列，不阻塞对话；支持连续下达多个命令，任务排队执行；可随时查询进度（问"任务做得怎么样了"）；支持取消任务；控制台对话页有任务状态面板。所有安全闸口（硬闸口）完整保留，任务提交前必须确认 |
 
 ---
 
@@ -34,7 +35,7 @@
 | `打包exe.bat`   | 把所有功能打包成可独立运行的 exe（产物在 `dist\`）        |
 
 > 如果双击后窗口一闪而过：这些脚本已按 Windows 要求存为 **CRLF 行尾 + GBK 编码**，正常情况下不会闪退。仍不行就手动开 cmd 运行：  
-> `cd /d D:\流萤\fairy` 然后 `.venv\Scripts\python.exe main.py`
+> `cd /d D:\流萤\firefly` 然后 `.venv\Scripts\python.exe main.py`
 
 ---
 
@@ -144,14 +145,14 @@ python main.py --emotion     # 查看当前情绪状态与发给 TTS 的风格�
 
 #### 对外接口（给外部程序调用）
 
-若你想让别的程序/Pi 扩展反过来调用流萤，用统一入口 `fairy.py api`（stdout 单行 JSON；开发期也可直接 `python fairy_api.py`）：
+若你想让别的程序/Pi 扩展反过来调用流萤，用统一入口 `firefly.py api`（stdout 单行 JSON；开发期也可直接 `python firefly_api.py`）：
 
 ```bash
-python fairy.py api ping                      # 健康检查
-python fairy.py api context --query 关键词     # 取"人设+相关往事"整块
-python fairy.py api remember --role user --text "记住这句话"
-python fairy.py api say --text "用流萤的声音念这句"
-python fairy.py api search --query 豆豆        # 检索历史记忆
+python firefly.py api ping                      # 健康检查
+python firefly.py api context --query 关键词     # 取"人设+相关往事"整块
+python firefly.py api remember --role user --text "记住这句话"
+python firefly.py api say --text "用流萤的声音念这句"
+python firefly.py api search --query 豆豆        # 检索历史记忆
 ```
 
 打包成 exe 后，等价命令是 `流萤.exe api ping`（接口协议不变，仍输出单行 JSON、退出码 0/1/2）。
@@ -195,25 +196,25 @@ python fairy.py api search --query 豆豆        # 检索历史记忆
 
 ---
 
-## 四、配置真·语音唤醒「Hi Fairy」（可选，3 步）
+## 四、配置真·语音唤醒「Hi Firefly」（可选，3 步）
 
 当前默认是**空格键兜底**，想升级成喊名字：
 
 1. 打开 <https://console.picovoice.ai/> 注册（个人免费），复制 **AccessKey**
-2. 在控制台的 Porcupine 页面 **创建唤醒词**，输入 `Hi Fairy`，选 Windows，下载 `.ppn` 文件
+2. 在控制台的 Porcupine 页面 **创建唤醒词**，输入 `Hi Firefly`，选 Windows，下载 `.ppn` 文件
 3. 把两项填进 `config.json`：
 
 ```json
 "wake": {
   "porcupine_access_key": "你的 AccessKey",
-  "porcupine_keyword_path": "C:/路径/Hi-Fairy_en_windows_v3_0_0.ppn",
+  "porcupine_keyword_path": "C:/路径/Hi-Firefly_en_windows_v3_0_0.ppn",
   "sensitivity": 0.85
 }
 ```
 
 然后安装唤醒依赖：`pip install pvporcupine`（程序会自动检测，有 Key 就走语音唤醒，没有就继续用空格）。
 
-> 想完全离线、不依赖 Picovoice？进阶路线是 openWakeWord 自训练「Hi Fairy」模型，需要录几十条语音样本 + 训练，后续阶段再做。
+> 想完全离线、不依赖 Picovoice？进阶路线是 openWakeWord 自训练「Hi Firefly」模型，需要录几十条语音样本 + 训练，后续阶段再做。
 
 ---
 
@@ -240,9 +241,9 @@ python fairy.py api search --query 豆豆        # 检索历史记忆
 
 | 现象                    | 排查                                                                                                             |
 | --------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **双击 bat 窗口一闪就没**     | 脚本已是 CRLF+GBK（2026-09-07 修复）。仍闪退就手动开 cmd：`cd /d D:\流萤\fairy` → `.venv\Scripts\python.exe main.py`              |
-| **按空格没反应**            | ① 黑窗口被鼠标点过会进「标记模式」吞按键 → 按 **Esc** 解除；② 当前是空格键兜底模式，**按空格后直接说话，不用喊 Hi Fairy**；③ 跑 `麦克风体检.bat` 看是不是没收到声音          |
-| **喊「Hi Fairy」没反应**    | 没配 Picovoice 时**不会**本地识别唤醒词；但已加云端兜底——你说的话被识别成"Hi Fairy"时，助手会回一句"我在呢"并接着听你说。想要真·本地唤醒见第四节                        |
+| **双击 bat 窗口一闪就没**     | 脚本已是 CRLF+GBK（2026-09-07 修复）。仍闪退就手动开 cmd：`cd /d D:\流萤\firefly` → `.venv\Scripts\python.exe main.py`              |
+| **按空格没反应**            | ① 黑窗口被鼠标点过会进「标记模式」吞按键 → 按 **Esc** 解除；② 当前是空格键兜底模式，**按空格后直接说话，不用喊 Hi Firefly**；③ 跑 `麦克风体检.bat` 看是不是没收到声音          |
+| **喊「Hi Firefly」没反应**    | 没配 Picovoice 时**不会**本地识别唤醒词；但已加云端兜底——你说的话被识别成"Hi Firefly"时，助手会回一句"我在呢"并接着听你说。想要真·本地唤醒见第四节                        |
 | 说"未配置 API Key"        | `config.json` 里 `mimo.api_key` / `llm.api_key` 没填                                                              |
 | 需要装 Pi 吗            | **不装也能用**。流萤平时完全独立运行，只在你说 `/pi 任务`（或点名"用 Pi 帮我"）时才去调本机 `pi` 命令行。没装或没配好时，`/pi` 会明确提示"没找到 pi 命令"，其余功能一切照常 |
 | **回复时最后两三个字没念出来**     | 蓝牙耳机/部分声卡的"尾部截断"毛病，已自动补 0.8 秒静音垫底。仍被截就把 `config.json` 里 `audio.output_tail_silence` 调大到 1.0~1.5                |
@@ -257,11 +258,11 @@ python fairy.py api search --query 豆豆        # 检索历史记忆
 ## 七、目录结构
 
 ```
-fairy/
-├─ fairy.py             唯一入口（打包与开发共用：按参数分发 gui / main / api / pet）
+firefly/
+├─ firefly.py             唯一入口（打包与开发共用：按参数分发 gui / main / api / pet）
 ├─ main.py              语音/键盘对话主程序（对话编排 / 唤醒 / 主循环）
 ├─ gui.py               图形控制台（tkinter，六页）
-├─ fairy_api.py         对外接口：给外部程序调用的单行 JSON CLI
+├─ firefly_api.py         对外接口：给外部程序调用的单行 JSON CLI
 ├─ build_exe.py         打包脚本（PyInstaller，产出 dist\ 里的单个 流萤.exe）
 ├─ config.json          全部配置（Key、麦克风、安全策略、emotion 段、pi 段）
 ├─ config.example.json  配置模板（首次运行会自动复制成 config.json）
@@ -281,7 +282,7 @@ fairy/
 │  ├─ pet.py            桌宠「小萤火虫流萤」四态动画
 │  ├─ actions.py        电脑操作工具集（含 pi_agent）
 │  ├─ agent_backend.py  外部 agent 后端注册表（出站扩展点）+ PiCliBackend
-│  ├─ config.py         配置加载（FAIRY_ROOT 覆盖 + 打包后根目录适配）
+│  ├─ config.py         配置加载（FIREFLY_ROOT 覆盖 + 打包后根目录适配）
 │  ├─ stats.py          使用统计
 │  └─ safety.py         安全闸口 + 审计日志
 ├─ data/                记忆库与日志（运行时生成）
@@ -308,5 +309,5 @@ fairy/
 11. 对外接口硬化（协议版本号 / 注入体量可选），为将来做 Pi 扩展铺路
 12. 让桌宠形象随情绪联动（现在桌宠只有 4 个动作状态，可接入情绪做表情/颜色变化）
 13. 全权接管的安全放开（在硬闸口框架下逐步开放更多操作，如批量整理文件）
-14. openWakeWord 自训练「Hi Fairy」（彻底离线唤醒，摆脱 Picovoice Key）
+14. openWakeWord 自训练「Hi Firefly」（彻底离线唤醒，摆脱 Picovoice Key）
 
