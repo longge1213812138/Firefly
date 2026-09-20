@@ -1090,10 +1090,15 @@ class ConsoleApp:
     _CFG_WATCH = (
         ("大脑模型", "model_var"),
         ("大脑接口地址", "baseurl_var"),
+        ("TTS 接口地址", "tts_baseurl_var"),
         ("合成方式", "tts_model_var"),
         ("音色", "voice_var"),
         ("音色描述/风格指令", "voice_instruction_var"),
         ("参考音频", "ref_audio_var"),
+        ("ASR 服务商", "asr_provider_var"),
+        ("ASR 接口地址", "asr_baseurl_var"),
+        ("ASR 模型", "asr_model_var"),
+        ("ASR 语言", "asr_lang_var"),
         ("性格随机度", "temp_var"),
         ("唤醒词", "keyword_var"),
         ("录音静音阈值", "thresh_var"),
@@ -1164,14 +1169,82 @@ class ConsoleApp:
         except Exception:  # noqa: BLE001
             pass
 
+    def _on_tab_changed(self, event=None) -> None:
+        """标签页切换时的处理：更新脏数据提示 + 管理鼠标滚轮绑定。"""
+        self._refresh_cfg_dirty_hint()
+        # 管理鼠标滚轮绑定：只在配置页时启用
+        if hasattr(self, '_config_canvas') and hasattr(self, '_config_mousewheel_handler'):
+            current_tab = self.nb.select()
+            config_tab = str(self._config_canvas.master)  # canvas 的父级就是 f
+            # 通过比较 tab id 来判断是否在配置页
+            try:
+                tab_text = self.nb.tab(current_tab, "text").strip()
+                if tab_text == "配置":
+                    # 在配置页，绑定滚轮
+                    self._config_canvas.bind_all("<MouseWheel>", self._config_mousewheel_handler)
+                else:
+                    # 不在配置页，解绑滚轮
+                    self._config_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+
     def _build_config_tab(self) -> None:
         f = ttk.Frame(self.nb)
         self.nb.add(f, text=" 配置 ")
 
-        wrap = ttk.Frame(f)
-        wrap.pack(fill="both", expand=True, padx=10, pady=8)
+        # 底部固定按钮栏（始终可见，不随内容滚动）
+        btns = ttk.Frame(f)
+        btns.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        self.cfg_dirty_var = tk.StringVar(value="")
+        ttk.Label(btns, textvariable=self.cfg_dirty_var, font=FONT_SMALL,
+                  foreground="#b23b3b").pack(side="left")
+        ttk.Button(btns, text="保存人设", command=self._save_persona).pack(side="right")
+        ttk.Button(btns, text="保存配置（并重载大脑）", command=self._save_config).pack(side="right", padx=8)
+
+        # 创建 Canvas 和 Scrollbar 实现滚动功能
+        canvas = tk.Canvas(f, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 放置 Canvas 和 Scrollbar
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="top", fill="both", expand=True)
+
+        # 创建内部框架
+        wrap = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=wrap, anchor="nw", tags="inner")
+
+        # 配置滚动区域
         wrap.columnconfigure(1, weight=1)
         row = {"n": 0}
+
+        # 当内部框架大小改变时更新滚动区域
+        def on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        wrap.bind("<Configure>", on_frame_configure)
+
+        # 当 Canvas 大小改变时调整内部框架宽度
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        # 绑定鼠标滚轮事件
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # 存储 canvas 引用以便后续清理
+        self._config_canvas = canvas
+        self._config_mousewheel_handler = on_mousewheel
+
+        # 初始绑定（如果当前在配置页）
+        try:
+            current_tab_text = self.nb.tab(self.nb.select(), "text").strip()
+            if current_tab_text == "配置":
+                canvas.bind_all("<MouseWheel>", on_mousewheel)
+        except Exception:
+            pass
 
         def next_row() -> int:
             row["n"] += 1
@@ -1184,8 +1257,8 @@ class ConsoleApp:
         mimo = self.cfg.get("mimo", {})
         llm = self.cfg.get("llm", {})
 
-        # API Key（掩码：不回显明文）+ 独立保存按钮
-        label("API Key（小米 tp-…）", font=FONT)
+        # ========== 共用 API Key（小米，可选） ==========
+        label("共用 API Key（小米 tp-…）", font=FONT)
         self.key_var = tk.StringVar(value="")  # 安全：绝不回显已存的 Key
         ttk.Entry(wrap, textvariable=self.key_var, width=46, show="•").grid(
             row=row["n"], column=1, sticky="w", pady=3)
@@ -1194,33 +1267,79 @@ class ConsoleApp:
             row=row["n"], column=2, sticky="w", padx=6)
         key_btn_frame = ttk.Frame(wrap)
         key_btn_frame.grid(row=next_row(), column=1, columnspan=2, sticky="w", pady=(0, 4))
-        ttk.Button(key_btn_frame, text="💾 保存 API Key",
+        ttk.Button(key_btn_frame, text="💾 保存共用 Key",
                    command=self._save_api_key).pack(side="left")
         self.key_status_var = tk.StringVar(value="")
         ttk.Label(key_btn_frame, textvariable=self.key_status_var,
                   font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
-
-        label("大脑模型", font=FONT)
-        self.model_var = tk.StringVar(value=llm.get("model", "mimo-v2.5"))
-        ttk.Combobox(wrap, textvariable=self.model_var, width=43,
-                     values=["mimo-v2.5", "mimo-v2.5-pro"]).grid(
-            row=row["n"], column=1, sticky="w", pady=3)
-
-        label("大脑接口地址", font=FONT)
-        self.baseurl_var = tk.StringVar(value=llm.get("base_url", ""))
-        ttk.Entry(wrap, textvariable=self.baseurl_var, width=46).grid(
-            row=row["n"], column=1, sticky="w", pady=3)
-        llm_btn_frame = ttk.Frame(wrap)
-        llm_btn_frame.grid(row=next_row(), column=1, columnspan=2, sticky="w", pady=(0, 4))
-        ttk.Button(llm_btn_frame, text="💾 保存模型/接口",
-                   command=self._save_llm_settings).pack(side="left")
-        self.llm_status_var = tk.StringVar(value="")
-        ttk.Label(llm_btn_frame, textvariable=self.llm_status_var,
+        ttk.Label(key_btn_frame, text="LLM/TTS/ASR 各自没填 Key 时自动复用这个",
                   font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
 
-        # ---------- 声音设置（MiMo TTS，对齐官方文档） ----------
-        vbox = ttk.LabelFrame(wrap, text=" 声音设置（小米 MiMo 语音合成） ")
+        # ========== LLM（大脑模型） ==========
+        llm_box = ttk.LabelFrame(wrap, text=" LLM（大脑模型） ")
+        llm_box.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(10, 4))
+
+        llm_row0 = ttk.Frame(llm_box)
+        llm_row0.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(llm_row0, text="API Key", font=FONT).pack(side="left")
+        self.llm_key_var = tk.StringVar(value="")
+        ttk.Entry(llm_row0, textvariable=self.llm_key_var, width=36, show="•").pack(
+            side="left", padx=(4, 8))
+        llm_has_key = "已配置 ✓（留空复用共用 Key）" if llm.get("api_key") else "留空 → 复用共用 Key"
+        self.llm_key_hint = ttk.Label(llm_row0, text=llm_has_key,
+                                      font=FONT_SMALL, foreground="#8a8f98")
+        self.llm_key_hint.pack(side="left")
+
+        llm_row1 = ttk.Frame(llm_box)
+        llm_row1.pack(fill="x", padx=8, pady=2)
+        ttk.Label(llm_row1, text="模型", font=FONT).pack(side="left")
+        self.model_var = tk.StringVar(value=llm.get("model", "mimo-v2.5"))
+        ttk.Combobox(llm_row1, textvariable=self.model_var, width=28,
+                     values=["mimo-v2.5", "mimo-v2.5-pro"]).pack(side="left", padx=(4, 8))
+        ttk.Label(llm_row1, text="mimo-v2.5=快速日常 / mimo-v2.5-pro=更聪明但更慢",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left")
+
+        llm_row2 = ttk.Frame(llm_box)
+        llm_row2.pack(fill="x", padx=8, pady=2)
+        ttk.Label(llm_row2, text="接口地址", font=FONT).pack(side="left")
+        self.baseurl_var = tk.StringVar(value=llm.get("base_url", ""))
+        ttk.Entry(llm_row2, textvariable=self.baseurl_var, width=42).pack(
+            side="left", padx=(4, 8))
+        ttk.Label(llm_row2, text="留空=使用共用地址", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        llm_row3 = ttk.Frame(llm_box)
+        llm_row3.pack(fill="x", padx=8, pady=(4, 6))
+        ttk.Button(llm_row3, text="💾 保存 LLM 设置",
+                   command=self._save_llm_settings).pack(side="left")
+        self.llm_status_var = tk.StringVar(value="")
+        ttk.Label(llm_row3, textvariable=self.llm_status_var,
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
+
+        # ========== TTS（语音合成） ==========
+        vbox = ttk.LabelFrame(wrap, text=" TTS（语音合成） ")
         vbox.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(10, 4))
+
+        tts = self.cfg.get("tts", {})
+        vrow_key = ttk.Frame(vbox)
+        vrow_key.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(vrow_key, text="API Key", font=FONT).pack(side="left")
+        self.tts_key_var = tk.StringVar(value="")
+        ttk.Entry(vrow_key, textvariable=self.tts_key_var, width=30, show="•").pack(
+            side="left", padx=(4, 8))
+        tts_has_key = "已配置 ✓（留空复用共用 Key）" if tts.get("api_key") else "留空 → 复用共用 Key"
+        self.tts_key_hint = ttk.Label(vrow_key, text=tts_has_key,
+                                      font=FONT_SMALL, foreground="#8a8f98")
+        self.tts_key_hint.pack(side="left")
+
+        vrow_url = ttk.Frame(vbox)
+        vrow_url.pack(fill="x", padx=8, pady=2)
+        ttk.Label(vrow_url, text="接口地址", font=FONT).pack(side="left")
+        self.tts_baseurl_var = tk.StringVar(value=tts.get("base_url", ""))
+        ttk.Entry(vrow_url, textvariable=self.tts_baseurl_var, width=38).pack(
+            side="left", padx=(4, 8))
+        ttk.Label(vrow_url, text="留空=使用共用地址；TTS 不可用时可单独改",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left")
 
         TTS_MODEL_DISPLAY = {
             "mimo-v2.5-tts": "预置音色（官方精品声音，开箱即用）",
@@ -1288,17 +1407,77 @@ class ConsoleApp:
         self.btn_ref_validate = ttk.Button(vrow5, text="✔ 校验参考音频",
                                           command=self._validate_ref_audio)
         self.btn_ref_validate.pack(side="left", padx=6)
-        ttk.Button(vrow5, text="💾 保存声音设置", command=self._save_voice_settings).pack(side="left")
+        ttk.Button(vrow5, text="💾 保存 TTS 设置", command=self._save_voice_settings).pack(side="left")
 
         vrow6 = ttk.Frame(vbox)
         vrow6.pack(fill="x", padx=8, pady=(0, 6))
-        self.voice_status_var = tk.StringVar(value="（改完先「试听」确认效果，满意后点「保存声音设置」）")
+        self.voice_status_var = tk.StringVar(value="（改完先「试听」确认效果，满意后点「保存 TTS 设置」）")
         self.voice_status_label = ttk.Label(vrow6, textvariable=self.voice_status_var,
                                             font=FONT_SMALL, foreground="#8a8f98")
         self.voice_status_label.pack(side="left")
 
         self.tts_model_var.trace_add("write", self._on_tts_model_change)
         self._on_tts_model_change()
+
+        # ========== ASR（语音识别） ==========
+        asr_cfg = self.cfg.get("asr", {})
+        abox = ttk.LabelFrame(wrap, text=" ASR（语音识别） ")
+        abox.grid(row=next_row(), column=0, columnspan=3, sticky="we", pady=(10, 4))
+
+        arow0 = ttk.Frame(abox)
+        arow0.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(arow0, text="API Key", font=FONT).pack(side="left")
+        self.asr_key_var = tk.StringVar(value="")
+        ttk.Entry(arow0, textvariable=self.asr_key_var, width=30, show="•").pack(
+            side="left", padx=(4, 8))
+        asr_has_key = "已配置 ✓（留空复用共用 Key）" if asr_cfg.get("api_key") else "留空 → 复用共用 Key"
+        self.asr_key_hint = ttk.Label(arow0, text=asr_has_key,
+                                      font=FONT_SMALL, foreground="#8a8f98")
+        self.asr_key_hint.pack(side="left")
+
+        arow1 = ttk.Frame(abox)
+        arow1.pack(fill="x", padx=8, pady=2)
+        ttk.Label(arow1, text="服务商", font=FONT).pack(side="left")
+        self.asr_provider_var = tk.StringVar(value=asr_cfg.get("provider", "mimo"))
+        ttk.Combobox(arow1, textvariable=self.asr_provider_var, width=28, state="readonly",
+                     values=["mimo", "whisper_api"]).pack(side="left", padx=(4, 8))
+        ttk.Label(arow1, text="mimo=小米 ASR｜whisper_api=OpenAI 兼容接口",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left")
+
+        arow2 = ttk.Frame(abox)
+        arow2.pack(fill="x", padx=8, pady=2)
+        ttk.Label(arow2, text="接口地址", font=FONT).pack(side="left")
+        self.asr_baseurl_var = tk.StringVar(value=asr_cfg.get("base_url", ""))
+        ttk.Entry(arow2, textvariable=self.asr_baseurl_var, width=38).pack(
+            side="left", padx=(4, 8))
+        ttk.Label(arow2, text="留空=使用共用地址", font=FONT_SMALL,
+                  foreground="#8a8f98").pack(side="left")
+
+        arow3 = ttk.Frame(abox)
+        arow3.pack(fill="x", padx=8, pady=2)
+        ttk.Label(arow3, text="模型", font=FONT).pack(side="left")
+        self.asr_model_var = tk.StringVar(value=asr_cfg.get("model", "mimo-v2.5-asr"))
+        ttk.Entry(arow3, textvariable=self.asr_model_var, width=28).pack(
+            side="left", padx=(4, 8))
+        ttk.Label(arow3, text="mimo-v2.5-asr / whisper-1 / 其它兼容模型",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left")
+
+        arow4 = ttk.Frame(abox)
+        arow4.pack(fill="x", padx=8, pady=2)
+        ttk.Label(arow4, text="语言", font=FONT).pack(side="left")
+        self.asr_lang_var = tk.StringVar(value=asr_cfg.get("language", "auto"))
+        ttk.Combobox(arow4, textvariable=self.asr_lang_var, width=10, state="readonly",
+                     values=["auto", "zh", "en", "ja"]).pack(side="left", padx=(4, 8))
+        ttk.Label(arow4, text="auto=自动检测 / zh=中文 / en=英文 / ja=日文",
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left")
+
+        arow5 = ttk.Frame(abox)
+        arow5.pack(fill="x", padx=8, pady=(4, 6))
+        ttk.Button(arow5, text="💾 保存 ASR 设置",
+                   command=self._save_asr_settings).pack(side="left")
+        self.asr_status_var = tk.StringVar(value="")
+        ttk.Label(arow5, textvariable=self.asr_status_var,
+                  font=FONT_SMALL, foreground="#8a8f98").pack(side="left", padx=8)
 
         label("性格随机度 temperature", font=FONT)
         self.temp_var = tk.StringVar(value=str(llm.get("temperature", 0.9)))
@@ -1533,16 +1712,8 @@ class ConsoleApp:
         self.persona_box.grid(row=next_row(), columnspan=3, sticky="we", pady=4)
         self.persona_box.insert("1.0", load_persona(self.cfg))
 
-        btns = ttk.Frame(f)
-        btns.pack(fill="x", padx=10, pady=(0, 10))
-        self.cfg_dirty_var = tk.StringVar(value="")
-        ttk.Label(btns, textvariable=self.cfg_dirty_var, font=FONT_SMALL,
-                  foreground="#b23b3b").pack(side="left")
-        ttk.Button(btns, text="保存人设", command=self._save_persona).pack(side="right")
-        ttk.Button(btns, text="保存配置（并重载大脑）", command=self._save_config).pack(side="right", padx=8)
-
         # 切页面时提示"还有没保存的修改"（退出时也会再确认一次，见 _quit_app）
-        self.nb.bind("<<NotebookTabChanged>>", lambda ev: self._refresh_cfg_dirty_hint())
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._cfg_snapshot = self._ui_cfg_snapshot()
 
     def _save_persona(self) -> None:
@@ -1587,9 +1758,10 @@ class ConsoleApp:
         self.worker.submit("reload")  # 通知后台重载大脑
 
     def _save_llm_settings(self) -> None:
-        """独立保存大脑模型 + 接口地址：写盘 → 立即重载 → 反馈。"""
+        """独立保存 LLM API Key + 模型 + 接口地址：写盘 → 立即重载 → 反馈。"""
         model = self.model_var.get().strip()
         base_url = self.baseurl_var.get().strip()
+        new_key = self.llm_key_var.get().strip()
         if not model:
             self.llm_status_var.set("模型名不能为空")
             return
@@ -1602,10 +1774,26 @@ class ConsoleApp:
         raw.setdefault("llm", {})
         raw["llm"]["model"] = model
         raw["llm"]["base_url"] = base_url
+        if new_key:
+            old_key = str(raw.get("llm", {}).get("api_key", ""))
+            if old_key and new_key != old_key:
+                if not messagebox.askyesno(
+                        "更换 LLM API Key",
+                        "你正在更换 LLM 的独立 API Key。\n\n"
+                        "旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                        "得回供应商平台重新复制。\n\n确定更换吗？",
+                        icon="warning"):
+                    self.llm_key_var.set("")
+                    self.llm_status_var.set("已取消更换，保留原 Key")
+                    return
+            raw["llm"]["api_key"] = new_key
         cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         self.cfg = load_config()
         self._cfg_snapshot = self._ui_cfg_snapshot()
-        self.llm_status_var.set(f"✓ 模型={model} 已保存并立即生效")
+        self.llm_key_var.set("")  # 清空输入框，安全不留痕
+        if raw["llm"].get("api_key"):
+            self.llm_key_hint.config(text="已配置 ✓（留空复用共用 Key）")
+        self.llm_status_var.set(f"✓ LLM 设置已保存（模型={model}），立即生效")
         self.worker.submit("reload")
 
     def _save_config(self) -> None:
@@ -1690,6 +1878,21 @@ class ConsoleApp:
             if new_key:
                 raw["mimo"]["api_key"] = new_key  # 留空 = 保持原 Key 不变
         raw.setdefault("llm", {})
+        llm_new_key = self.llm_key_var.get().strip()
+        if llm_new_key:
+            old_llm_key = str(raw.get("llm", {}).get("api_key", ""))
+            if old_llm_key and llm_new_key != old_llm_key:
+                if not messagebox.askyesno(
+                        "更换 LLM API Key",
+                        "你正在更换 LLM 的独立 API Key。\n\n"
+                        "旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                        "得回供应商平台重新复制。\n\n选「否」= 不换 Key，其余设置照常保存。\n\n确定更换吗？",
+                        icon="warning"):
+                    self.llm_key_var.set("")
+                    notes.append("LLM API Key 未更换（保留了原来的 Key）")
+                    llm_new_key = ""
+            if llm_new_key:
+                raw["llm"]["api_key"] = llm_new_key
         raw["llm"]["model"] = self.model_var.get().strip()
         raw["llm"]["base_url"] = self.baseurl_var.get().strip()
         raw["llm"]["temperature"] = temp
@@ -1700,6 +1903,45 @@ class ConsoleApp:
         raw["tts"]["voice"] = t["voice"]
         raw["tts"]["voice_instruction"] = t["voice_instruction"]
         raw["tts"]["reference_audio_path"] = t["reference_audio_path"]
+        tts_new_url = self.tts_baseurl_var.get().strip()
+        if tts_new_url:
+            raw["tts"]["base_url"] = tts_new_url
+        tts_new_key = self.tts_key_var.get().strip()
+        if tts_new_key:
+            old_tts_key = str(raw.get("tts", {}).get("api_key", ""))
+            if old_tts_key and tts_new_key != old_tts_key:
+                if not messagebox.askyesno(
+                        "更换 TTS API Key",
+                        "你正在更换 TTS 的独立 API Key。\n\n"
+                        "旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                        "得回供应商平台重新复制。\n\n选「否」= 不换 Key，其余设置照常保存。\n\n确定更换吗？",
+                        icon="warning"):
+                    self.tts_key_var.set("")
+                    notes.append("TTS API Key 未更换（保留了原来的 Key）")
+                    tts_new_key = ""
+            if tts_new_key:
+                raw["tts"]["api_key"] = tts_new_key
+        # ASR
+        raw.setdefault("asr", {})
+        raw["asr"]["provider"] = self.asr_provider_var.get().strip() or "mimo"
+        raw["asr"]["base_url"] = self.asr_baseurl_var.get().strip()
+        raw["asr"]["model"] = self.asr_model_var.get().strip() or "mimo-v2.5-asr"
+        raw["asr"]["language"] = self.asr_lang_var.get().strip() or "auto"
+        asr_new_key = self.asr_key_var.get().strip()
+        if asr_new_key:
+            old_asr_key = str(raw.get("asr", {}).get("api_key", ""))
+            if old_asr_key and asr_new_key != old_asr_key:
+                if not messagebox.askyesno(
+                        "更换 ASR API Key",
+                        "你正在更换 ASR 的独立 API Key。\n\n"
+                        "旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                        "得回供应商平台重新复制。\n\n选「否」= 不换 Key，其余设置照常保存。\n\n确定更换吗？",
+                        icon="warning"):
+                    self.asr_key_var.set("")
+                    notes.append("ASR API Key 未更换（保留了原来的 Key）")
+                    asr_new_key = ""
+            if asr_new_key:
+                raw["asr"]["api_key"] = asr_new_key
         raw.setdefault("wake", {})
         raw["wake"]["keyword"] = self.keyword_var.get().strip()
         raw.setdefault("audio", {})
@@ -1743,6 +1985,11 @@ class ConsoleApp:
         self.cfg = load_config()  # 内存里的配置同步刷新（桌宠重启等会用到）
         self._cfg_snapshot = self._ui_cfg_snapshot()   # 记下"已保存"的界面状态（退出保护用）
         self._refresh_cfg_dirty_hint()
+        # 清空所有 Key 输入框，安全不留痕
+        self.key_var.set("")
+        self.llm_key_var.set("")
+        self.tts_key_var.set("")
+        self.asr_key_var.set("")
         self.worker.submit("reload")
         note_tail = ("\n\n另外：\n· " + "\n· ".join(notes)) if notes else ""
         if bad:
@@ -1753,6 +2000,7 @@ class ConsoleApp:
         else:
             messagebox.showinfo("已保存", "配置已保存，大脑正在重载。\n"
                                           "（人设即时生效；换 Key/模型/音色/情绪设置后下一句对话用新配置；\n"
+                                          "  LLM/TTS/ASR 各自的独立 API Key 也已一并保存；\n"
                                           "  桌宠设置点「重启桌宠」立即生效）" + note_tail)
 
     def _toggle_autostart(self) -> None:
@@ -1827,30 +2075,92 @@ class ConsoleApp:
         self.voice_status_label.configure(foreground="#1a7f37" if ok else "#c0392b")
 
     def _save_voice_settings(self) -> None:
-        """只保存「声音设置」这一组，并立即重载大脑。"""
+        """保存 TTS API Key + 接口地址 + 声音设置，并立即重载大脑。"""
         t = self._current_tts_settings()
         issues = tts_settings_issues(t)
         if issues:
             self._voice_feedback(False, "保存失败：" + issues[0])
             messagebox.showerror("声音设置不完整", "请先解决以下问题再保存：\n\n· " + "\n· ".join(issues))
             return
-        cfg_path = config_path()      # 配置在哪只由 core.config 说了算
+        new_key = self.tts_key_var.get().strip()
+        new_url = self.tts_baseurl_var.get().strip()
+        cfg_path = config_path()
         try:
             raw = json.loads(cfg_path.read_text(encoding="utf-8"))
             raw.setdefault("tts", {})
             raw["tts"].update(t)
+            if new_url:
+                raw["tts"]["base_url"] = new_url
+            if new_key:
+                old_key = str(raw.get("tts", {}).get("api_key", ""))
+                if old_key and new_key != old_key:
+                    if not messagebox.askyesno(
+                            "更换 TTS API Key",
+                            "你正在更换 TTS 的独立 API Key。\n\n"
+                            "旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                            "得回供应商平台重新复制。\n\n确定更换吗？",
+                            icon="warning"):
+                        self.tts_key_var.set("")
+                        self._voice_feedback(False, "已取消更换，保留原 Key")
+                        return
+                raw["tts"]["api_key"] = new_key
             cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             self._voice_feedback(False, f"保存失败：{exc}")
             messagebox.showerror("保存失败", f"写入 config.json 时出错：\n{exc}")
             return
         self.cfg = load_config()
-        # 这是**另一条写盘路径**：不刷新快照的话，退出时会把已保存的声音设置误报成"未保存"
         self._cfg_snapshot = self._ui_cfg_snapshot()
         self._refresh_cfg_dirty_hint()
+        self.tts_key_var.set("")
+        if raw.get("tts", {}).get("api_key"):
+            self.tts_key_hint.config(text="已配置 ✓（留空复用共用 Key）")
         self.worker.submit("reload")
-        self._voice_feedback(True, f"声音设置已保存（{t['model']}），下一句对话生效")
-        messagebox.showinfo("已保存", "声音设置已保存，下一句对话立即用新声音。")
+        self._voice_feedback(True, f"TTS 设置已保存（{t['model']}），下一句对话生效")
+        messagebox.showinfo("已保存", "TTS 设置已保存，下一句对话立即用新声音。")
+
+    def _save_asr_settings(self) -> None:
+        """独立保存 ASR API Key + 服务商 + 接口地址 + 模型 + 语言：写盘 → 立即重载 → 反馈。"""
+        new_key = self.asr_key_var.get().strip()
+        provider = self.asr_provider_var.get().strip()
+        base_url = self.asr_baseurl_var.get().strip()
+        model = self.asr_model_var.get().strip()
+        language = self.asr_lang_var.get().strip()
+        if not provider:
+            self.asr_status_var.set("服务商不能为空")
+            return
+        cfg_path = Path("config.json")
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.asr_status_var.set(f"读取失败：{exc}")
+            return
+        raw.setdefault("asr", {})
+        raw["asr"]["provider"] = provider
+        raw["asr"]["base_url"] = base_url
+        raw["asr"]["model"] = model
+        raw["asr"]["language"] = language
+        if new_key:
+            old_key = str(raw.get("asr", {}).get("api_key", ""))
+            if old_key and new_key != old_key:
+                if not messagebox.askyesno(
+                        "更换 ASR API Key",
+                        "你正在更换 ASR 的独立 API Key。\n\n"
+                        "旧 Key 保存后就不再显示；新 Key 一旦填错，"
+                        "得回供应商平台重新复制。\n\n确定更换吗？",
+                        icon="warning"):
+                    self.asr_key_var.set("")
+                    self.asr_status_var.set("已取消更换，保留原 Key")
+                    return
+            raw["asr"]["api_key"] = new_key
+        cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.cfg = load_config()
+        self._cfg_snapshot = self._ui_cfg_snapshot()
+        self.asr_key_var.set("")
+        if raw["asr"].get("api_key"):
+            self.asr_key_hint.config(text="已配置 ✓（留空复用共用 Key）")
+        self.asr_status_var.set(f"✓ ASR 设置已保存（{provider}/{model}），立即生效")
+        self.worker.submit("reload")
 
     def _test_voice(self) -> None:
         """用界面上当前填写的设置合成一句试听（不保存配置）。"""
@@ -1860,10 +2170,10 @@ class ConsoleApp:
             self._voice_feedback(False, "无法试听：" + issues[0])
             messagebox.showerror("还不能试听", "请先解决：\n\n· " + "\n· ".join(issues))
             return
-        api_key = self.key_var.get().strip() or self.cfg.get("mimo", {}).get("api_key", "")
+        api_key = self.tts_key_var.get().strip() or self.key_var.get().strip() or self.cfg.get("tts", {}).get("api_key", "") or self.cfg.get("mimo", {}).get("api_key", "")
         if not api_key:
             self._voice_feedback(False, "无法试听：还没配置 API Key")
-            messagebox.showerror("缺少 API Key", "请先在上方「API Key」里填入小米 MiMo 的 Key（tp- 开头）。")
+            messagebox.showerror("缺少 API Key", "请先填入 TTS 的 API Key（或上方的共用 Key）。")
             return
         self.btn_voice_test.configure(state="disabled")
         self._voice_feedback(True, "正在合成试听……（联网，通常几秒钟）")
@@ -2243,6 +2553,14 @@ class ConsoleApp:
         stop_pet(self.pet_q)
         self.pet_q = None
         self._stop_tray()
+
+        # 清理鼠标滚轮绑定
+        if hasattr(self, '_config_canvas') and hasattr(self, '_config_mousewheel_handler'):
+            try:
+                self._config_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+
         self.root.destroy()
 
     # ============ 系统托盘 ============
