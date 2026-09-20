@@ -1,6 +1,10 @@
 # 🧚 Firefly（流萤）· 本地优先语音私人助手 MVP
 
-以「情感陪伴 + 接管电脑操作」为核心的本地语音助手。所有对话、记忆、日志**只存在你电脑本地**（`firefly/data/`），除调用云端 API 之外不向外发送数据。
+以「情感陪伴 + 接管电脑操作」为核心的本地语音助手。所有对话、记忆、日志**只存在你电脑本地**（`data/`），除调用云端 API 之外不向外发送数据。
+
+> 📦 当前版本 **v0.5.5** ｜ 🌟 GitHub 仓库：<https://github.com/longge1213812138/Firefly>
+>
+> **不想装 Python / 不想编译？** 直接去 [Release 页面](https://github.com/longge1213812138/Firefly/releases/tag/v0.5.5) 下载 `Firefly-win64-v0.5.5.zip`，解压后双击 `流萤.exe` 即可（仅支持 Windows 64 位）。首次运行会自动生成 `config.json`，填入小米 MiMo 的 API Key 就能用。
 
 ---
 
@@ -26,7 +30,7 @@
 
 | 脚本           | 作用                                     |
 | ------------ | -------------------------------------- |
-| `启动助手.bat`   | 先自检（25 项全绿才继续），再进入待命（桌宠随语音模式一起出现）      |
+| `启动助手.bat`   | 先自检（42 项全绿才继续），再进入待命（桌宠随语音模式一起出现）      |
 | `控制台.bat`    | 图形控制台：聊天、记忆管理、情绪、配置、统计、体检与审计日志         |
 | `桌宠.bat`     | 只启动桌宠小萤火虫（不进入语音对话）                     |
 | `键盘对话模式.bat` | 打字对话，不依赖麦克风，排查用                        |
@@ -35,7 +39,7 @@
 | `打包exe.bat`   | 把所有功能打包成可独立运行的 exe（产物在 `dist\`）        |
 
 > 如果双击后窗口一闪而过：这些脚本已按 Windows 要求存为 **CRLF 行尾 + GBK 编码**，正常情况下不会闪退。仍不行就手动开 cmd 运行：  
-> `cd /d D:\流萤\firefly` 然后 `.venv\Scripts\python.exe main.py`
+> `cd /d D:\流萤` 然后 `.venv\Scripts\python.exe main.py`
 
 ---
 
@@ -94,7 +98,7 @@ ASR 已做成可插拔。想换别家，改 `config.json` 里的 `asr` 段：
 
 ### 第 2 步：双击 `启动助手.bat`
 
-它先自检（25 项，全绿才继续），然后进入待命状态。
+它先自检（42 项，全绿才继续），然后进入待命状态。
 
 ### 第 3 步：按【空格】说话
 
@@ -186,6 +190,8 @@ python firefly.py api search --query 豆豆        # 检索历史记忆
 
 `dist\` 里同时会放好 `persona\`、`config.example.json`、`使用说明.txt`。**首次运行若没有 `config.json`，会自动按模板生成一份**，填好 Key 就能用。
 
+> 不想自己打包？GitHub Release 已提供编译好的 `Firefly-win64-v0.5.5.zip`（仅 Windows 64 位），解压即用。
+
 几个已经处理好的坑：
 
 - 打包后"项目根"会自动指向 **exe 所在目录**（而不是 PyInstaller 的临时解包目录），所以 `config.json` 与 `data\` 就在 exe 旁边，**整个文件夹拷走即用**
@@ -241,7 +247,7 @@ python firefly.py api search --query 豆豆        # 检索历史记忆
 
 | 现象                    | 排查                                                                                                             |
 | --------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **双击 bat 窗口一闪就没**     | 脚本已是 CRLF+GBK（2026-09-07 修复）。仍闪退就手动开 cmd：`cd /d D:\流萤\firefly` → `.venv\Scripts\python.exe main.py`              |
+| **双击 bat 窗口一闪就没**     | 脚本已是 CRLF+GBK（2026-09-07 修复）。仍闪退就手动开 cmd：`cd /d D:\流萤` → `.venv\Scripts\python.exe main.py`              |
 | **按空格没反应**            | ① 黑窗口被鼠标点过会进「标记模式」吞按键 → 按 **Esc** 解除；② 当前是空格键兜底模式，**按空格后直接说话，不用喊 Hi Firefly**；③ 跑 `麦克风体检.bat` 看是不是没收到声音          |
 | **喊「Hi Firefly」没反应**    | 没配 Picovoice 时**不会**本地识别唤醒词；但已加云端兜底——你说的话被识别成"Hi Firefly"时，助手会回一句"我在呢"并接着听你说。想要真·本地唤醒见第四节                        |
 | 说"未配置 API Key"        | `config.json` 里 `mimo.api_key` / `llm.api_key` 没填                                                              |
@@ -258,7 +264,7 @@ python firefly.py api search --query 豆豆        # 检索历史记忆
 ## 七、目录结构
 
 ```
-firefly/
+流萤/
 ├─ firefly.py             唯一入口（打包与开发共用：按参数分发 gui / main / api / pet）
 ├─ main.py              语音/键盘对话主程序（对话编排 / 唤醒 / 主循环）
 ├─ gui.py               图形控制台（tkinter，六页）
@@ -287,7 +293,7 @@ firefly/
 │  └─ safety.py         安全闸口 + 审计日志
 ├─ data/                记忆库与日志（运行时生成）
 ├─ dist/                打包产物（exe，不入库）
-├─ tests/smoke_test.py  离线自检用例（27 项）
+├─ tests/smoke_test.py  离线自检用例（42 项）
 ├─ 启动助手.bat         一键启动
 └─ 打包exe.bat          一键打包
 ```
